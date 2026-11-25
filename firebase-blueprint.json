@@ -1,0 +1,339 @@
+{
+  "entities": {
+    "UsernameReservation": {
+      "title": "UsernameReservation",
+      "description": "Atomic unique username registry mapping lowercase username to Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp (FieldValue.serverTimestamp())." }
+      },
+      "required": ["userId", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Public non-PII messaging profile for UChat users.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "username": { "type": "string" },
+        "usernameLower": { "type": "string" },
+        "displayName": { "type": "string" },
+        "displayNameLower": { "type": "string" },
+        "about": { "type": "string" },
+        "avatarBase64": { "type": "string" },
+        "online": { "type": "boolean" },
+        "lastSeen": { "type": "string", "format": "date-time" },
+        "showLastSeen": { "type": "boolean" },
+        "showOnline": { "type": "boolean" },
+        "showAbout": { "type": "boolean" },
+        "readReceipts": { "type": "boolean" },
+        "discoverable": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "username", "usernameLower", "displayName", "displayNameLower",
+        "about", "online", "lastSeen", "showLastSeen", "showOnline",
+        "showAbout", "readReceipts", "discoverable", "createdAt", "updatedAt"
+      ]
+    },
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "Owner-only notification, ringtone, and appearance settings.",
+      "type": "object",
+      "properties": {
+        "accentHex": { "type": "string" },
+        "wallpaperStyle": { "type": "string" },
+        "fontScale": { "type": "number" },
+        "msgNotif": { "type": "boolean" },
+        "groupNotif": { "type": "boolean" },
+        "callNotif": { "type": "boolean" },
+        "soundEnabled": { "type": "boolean" },
+        "ringtoneName": { "type": "string" },
+        "ringtoneUri": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "accentHex", "wallpaperStyle", "fontScale", "msgNotif",
+        "groupNotif", "callNotif", "soundEnabled", "ringtoneName",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "ContactEntry": {
+      "title": "ContactEntry",
+      "description": "Saved UChat contact for a user.",
+      "type": "object",
+      "properties": {
+        "contactUid": { "type": "string" },
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "avatarBase64": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["contactUid", "username", "displayName", "createdAt"]
+    },
+    "BlockedUser": {
+      "title": "BlockedUser",
+      "description": "Blocked user entry owned by the blocker.",
+      "type": "object",
+      "properties": {
+        "blockedUid": { "type": "string" },
+        "username": { "type": "string" },
+        "displayName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["blockedUid", "username", "displayName", "createdAt"]
+    },
+    "ChatPref": {
+      "title": "ChatPref",
+      "description": "Per-user preferences for a conversation (pin, archive, mute, hide, unread count).",
+      "type": "object",
+      "properties": {
+        "conversationId": { "type": "string" },
+        "pinned": { "type": "boolean" },
+        "archived": { "type": "boolean" },
+        "muted": { "type": "boolean" },
+        "hidden": { "type": "boolean" },
+        "unreadCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["conversationId", "pinned", "archived", "muted", "hidden", "unreadCount", "createdAt", "updatedAt"]
+    },
+    "FollowedChannel": {
+      "title": "FollowedChannel",
+      "description": "Channel subscription record owned by the follower.",
+      "type": "object",
+      "properties": {
+        "channelId": { "type": "string" },
+        "channelName": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["channelId", "channelName", "createdAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Direct one-to-one or group messaging conversation.",
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["direct", "group"] },
+        "memberUids": { "type": "array" },
+        "adminUids": { "type": "array" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "avatarBase64": { "type": "string" },
+        "memberNames": { "type": "object" },
+        "memberUsernames": { "type": "object" },
+        "lastMessageText": { "type": "string" },
+        "lastMessageType": { "type": "string" },
+        "lastMessageSenderId": { "type": "string" },
+        "lastMessageAt": { "type": "string", "format": "date-time" },
+        "typingUid": { "type": "string" },
+        "typingAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "kind", "memberUids", "adminUids", "title", "description",
+        "memberNames", "memberUsernames", "lastMessageText", "lastMessageType",
+        "lastMessageSenderId", "lastMessageAt", "createdBy", "createdAt", "updatedAt"
+      ]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Real-time message inside a conversation with denormalized memberUids.",
+      "type": "object",
+      "properties": {
+        "conversationId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "messageType": { "type": "string", "enum": ["text", "image", "voice", "document", "audio", "location", "contact"] },
+        "text": { "type": "string" },
+        "mediaBase64": { "type": "string" },
+        "mediaName": { "type": "string" },
+        "mediaDurationSec": { "type": "integer" },
+        "waveform": { "type": "array" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "contactName": { "type": "string" },
+        "contactUsername": { "type": "string" },
+        "replyToId": { "type": "string" },
+        "replyToText": { "type": "string" },
+        "replyToSender": { "type": "string" },
+        "forwarded": { "type": "boolean" },
+        "edited": { "type": "boolean" },
+        "deleted": { "type": "boolean" },
+        "deliveredTo": { "type": "array" },
+        "readBy": { "type": "array" },
+        "starredBy": { "type": "array" },
+        "reactions": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "conversationId", "senderId", "senderName", "memberUids", "messageType",
+        "text", "forwarded", "edited", "deleted", "deliveredTo", "readBy",
+        "starredBy", "reactions", "createdAt", "updatedAt"
+      ]
+    },
+    "Channel": {
+      "title": "Channel",
+      "description": "Public broadcast channel with admin-only publishing.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "ownerName": { "type": "string" },
+        "avatarBase64": { "type": "string" },
+        "followerCount": { "type": "integer" },
+        "discoverable": { "type": "boolean" },
+        "lastPostText": { "type": "string" },
+        "lastPostAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "name", "description", "ownerId", "ownerName", "followerCount",
+        "discoverable", "lastPostText", "createdAt", "updatedAt"
+      ]
+    },
+    "ChannelPost": {
+      "title": "ChannelPost",
+      "description": "Broadcast post published by channel owner.",
+      "type": "object",
+      "properties": {
+        "channelId": { "type": "string" },
+        "authorId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "postType": { "type": "string", "enum": ["text", "image"] },
+        "text": { "type": "string" },
+        "mediaBase64": { "type": "string" },
+        "reactions": { "type": "object" },
+        "discoverable": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "channelId", "authorId", "authorName", "postType", "text",
+        "reactions", "discoverable", "createdAt", "updatedAt"
+      ]
+    },
+    "CallRecord": {
+      "title": "CallRecord",
+      "description": "One-to-one audio/video call signaling session and call history log.",
+      "type": "object",
+      "properties": {
+        "callerId": { "type": "string" },
+        "callerName": { "type": "string" },
+        "callerUsername": { "type": "string" },
+        "calleeId": { "type": "string" },
+        "calleeName": { "type": "string" },
+        "calleeUsername": { "type": "string" },
+        "participantUids": { "type": "array" },
+        "callType": { "type": "string", "enum": ["audio", "video"] },
+        "status": { "type": "string", "enum": ["ringing", "connecting", "connected", "ended", "rejected", "missed", "cancelled"] },
+        "sdpOffer": { "type": "string" },
+        "sdpAnswer": { "type": "string" },
+        "durationSec": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "callerId", "callerName", "callerUsername", "calleeId", "calleeName",
+        "calleeUsername", "participantUids", "callType", "status", "durationSec",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "IceCandidate": {
+      "title": "IceCandidate",
+      "description": "WebRTC ICE signaling candidate for an active call.",
+      "type": "object",
+      "properties": {
+        "callId": { "type": "string" },
+        "senderId": { "type": "string" },
+        "participantUids": { "type": "array" },
+        "candidate": { "type": "string" },
+        "sdpMid": { "type": "string" },
+        "sdpMLineIndex": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["callId", "senderId", "participantUids", "candidate", "sdpMid", "sdpMLineIndex", "createdAt"]
+    },
+    "UserReport": {
+      "title": "UserReport",
+      "description": "Abuse or problem report submitted by a signed-in user.",
+      "type": "object",
+      "properties": {
+        "reporterId": { "type": "string" },
+        "targetUid": { "type": "string" },
+        "category": { "type": "string" },
+        "details": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reporterId", "category", "details", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/usernames/{username}": {
+      "schema": { "$ref": "#/entities/UsernameReservation" },
+      "description": "Unique lowercase username reservation docs."
+    },
+    "/profiles/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Public discoverable user messaging profiles (zero PII)."
+    },
+    "/users/{userId}/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "Owner-only notification and appearance preferences."
+    },
+    "/users/{userId}/contacts/{contactUid}": {
+      "schema": { "$ref": "#/entities/ContactEntry" },
+      "description": "Owner-only saved UChat contacts."
+    },
+    "/users/{userId}/blocked/{blockedUid}": {
+      "schema": { "$ref": "#/entities/BlockedUser" },
+      "description": "Owner-only blocked user list."
+    },
+    "/users/{userId}/chatPrefs/{conversationId}": {
+      "schema": { "$ref": "#/entities/ChatPref" },
+      "description": "Owner-only per-chat pin, archive, mute, hidden, and unread preferences."
+    },
+    "/users/{userId}/followedChannels/{channelId}": {
+      "schema": { "$ref": "#/entities/FollowedChannel" },
+      "description": "Owner-only followed channels."
+    },
+    "/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "Direct and group chats scoped by memberUids."
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Real-time messages scoped by denormalized memberUids."
+    },
+    "/channels/{channelId}": {
+      "schema": { "$ref": "#/entities/Channel" },
+      "description": "Public broadcast channels."
+    },
+    "/channels/{channelId}/posts/{postId}": {
+      "schema": { "$ref": "#/entities/ChannelPost" },
+      "description": "Broadcast channel posts with owner-only creation and follower emoji reactions."
+    },
+    "/calls/{callId}": {
+      "schema": { "$ref": "#/entities/CallRecord" },
+      "description": "One-to-one call signaling and history records scoped by participantUids."
+    },
+    "/calls/{callId}/candidates/{candidateId}": {
+      "schema": { "$ref": "#/entities/IceCandidate" },
+      "description": "WebRTC ICE candidates for a call."
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/UserReport" },
+      "description": "User-submitted issue and abuse reports."
+    }
+  }
+}

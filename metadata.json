@@ -1,0 +1,6 @@
+{
+  "name": "UChat",
+  "description": "Real-time dark-themed messaging, voice notes, channels, group chats, and WebRTC signaling calling app powered by Firebase.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

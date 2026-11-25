@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">UChat</string>
+    <string name="tagline">Private, real-time messaging &amp; calls</string>
+    <string name="sign_in_email">Sign in</string>
+    <string name="tab_chats">Chats</string>
+    <string name="tab_channels">Channels</string>
+    <string name="tab_calls">Calls</string>
+    <string name="tab_settings">Settings</string>
+    <string name="profile_setup_title">Create your UChat ID</string>
+    <string name="profile_setup_subtitle">Pick a unique username so friends can find and message you securely.</string>
+    <string name="message_placeholder">Message</string>
+    <string name="search_chats_hint">Search chats or @username</string>
+    <string name="search_channels_hint">Search public channels</string>
+    <string name="no_chats_title">No conversations yet</string>
+    <string name="no_chats_body">Tap the compose button below to find someone by @username or start a new group.</string>
+    <string name="no_channels_title">Explore Channels</string>
+    <string name="no_channels_body">Create a broadcast channel or follow public channels for real-time updates.</string>
+    <string name="no_calls_title">No recent calls</string>
+    <string name="no_calls_body">Start an audio or video call from any chat or tap the call button below.</string>
+    <string name="sign_out">Sign out</string>
+</resources>
