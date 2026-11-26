@@ -483,10 +483,11 @@ class SupabaseClient(
             .orEmpty()
         val lower = msg.lowercase()
         return when {
-            lower.contains("invalid input syntax for type uuid") ||
-                lower.contains("relation") && lower.contains("does not exist") ||
+            lower.contains("invalid input syntax for type uuid") ->
+                "Your Supabase tables are still using the old UUID format. Run the updated supabase_schema.sql in Supabase SQL Editor and tap Retry."
+            (lower.contains("relation") && lower.contains("does not exist")) ||
                 lower.contains("could not find the table") ->
-                "Supabase tables need setup/update. Run supabase_schema.sql in your Supabase SQL Editor and tap Retry."
+                "Supabase tables have not been created yet. Run supabase_schema.sql in your Supabase Dashboard → SQL Editor, then tap Retry."
             code == 401 ->
                 "Supabase rejected the API key (HTTP 401). Check SUPABASE_ANON_KEY in Secrets."
             lower.contains("row-level security") ->

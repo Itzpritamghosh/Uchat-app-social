@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -88,6 +89,7 @@ class UChatViewModel(
         _profileRetryTick.flatMapLatest {
             profileRepo.observeMyProfile(currentUserId)
                 .map<UserProfile?, UiState<UserProfile?>> { UiState.Success(it) }
+                .onStart { emit(UiState.Loading) }
                 .catch { err ->
                     Log.w(VM_TAG, "Error observing profile", err)
                     emit(UiState.Error(err.message ?: "Unable to sync profile"))
@@ -103,28 +105,30 @@ class UChatViewModel(
     }
 
     val discoverableProfilesState: StateFlow<UiState<List<UserProfile>>> =
-        profileRepo.observeDiscoverableProfiles().toUiState("users")
+        _profileRetryTick.flatMapLatest { profileRepo.observeDiscoverableProfiles() }
+            .toUiState("users")
 
     val settingsState: StateFlow<UserSettings> =
-        profileRepo.observeSettings(currentUserId)
-            .catch { err ->
-                Log.w(VM_TAG, "Settings fallback", err)
-                emit(UserSettings())
-            }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), UserSettings())
+        _profileRetryTick.flatMapLatest {
+            profileRepo.observeSettings(currentUserId)
+                .catch { err ->
+                    Log.w(VM_TAG, "Settings fallback", err)
+                    emit(UserSettings())
+                }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), UserSettings())
 
     val contactsState: StateFlow<List<ContactEntry>> =
-        profileRepo.observeContacts(currentUserId)
-            .catch {
-                emit(emptyList())
-            }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
+        _profileRetryTick.flatMapLatest {
+            profileRepo.observeContacts(currentUserId)
+                .catch { emit(emptyList()) }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
 
     val presenceByUidState: StateFlow<Map<String, UserProfile>> =
         combine(
             discoverableProfilesState.map { (it as? UiState.Success)?.data ?: emptyList() },
             contactsState.flatMapLatest { contacts ->
                 profileRepo.observeProfilesByIds(contacts.map { it.contactUid })
+                    .catch { emit(emptyMap()) }
             }
         ) { discoverable, contactProfiles ->
             buildMap {
@@ -142,24 +146,23 @@ class UChatViewModel(
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), System.currentTimeMillis())
 
     val blockedUsersState: StateFlow<List<BlockedUser>> =
-        profileRepo.observeBlockedUsers(currentUserId)
-            .catch {
-                emit(emptyList())
-            }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
+        _profileRetryTick.flatMapLatest {
+            profileRepo.observeBlockedUsers(currentUserId)
+                .catch { emit(emptyList()) }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
 
     val conversationsState: StateFlow<UiState<List<Conversation>>> =
-        chatRepo.observeConversations(currentUserId).toUiState("conversations")
+        _profileRetryTick.flatMapLatest { chatRepo.observeConversations(currentUserId) }
+            .toUiState("conversations")
 
     val chatPrefsState: StateFlow<Map<String, ChatPref>> =
-        chatRepo.observeChatPrefs(currentUserId)
-            .catch {
-                emit(emptyMap())
-            }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyMap())
+        _profileRetryTick.flatMapLatest {
+            chatRepo.observeChatPrefs(currentUserId)
+                .catch { emit(emptyMap()) }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyMap())
 
     val activeMessagesState: StateFlow<UiState<List<ChatMessage>>> =
-        _activeConversationId
+        combine(_activeConversationId, _profileRetryTick) { convId, _ -> convId }
             .flatMapLatest { convId ->
                 if (convId.isNullOrBlank()) flowOf(emptyList())
                 else chatRepo.observeMessages(convId, currentUserId)
@@ -167,17 +170,17 @@ class UChatViewModel(
             .toUiState("messages")
 
     val channelsState: StateFlow<UiState<List<Channel>>> =
-        channelRepo.observePublicChannels().toUiState("channels")
+        _profileRetryTick.flatMapLatest { channelRepo.observePublicChannels() }
+            .toUiState("channels")
 
     val followedChannelIdsState: StateFlow<Set<String>> =
-        channelRepo.observeFollowedChannels(currentUserId)
-            .catch {
-                emit(emptySet())
-            }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptySet())
+        _profileRetryTick.flatMapLatest {
+            channelRepo.observeFollowedChannels(currentUserId)
+                .catch { emit(emptySet()) }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptySet())
 
     val activeChannelPostsState: StateFlow<UiState<List<ChannelPost>>> =
-        _activeChannelId
+        combine(_activeChannelId, _profileRetryTick) { chanId, _ -> chanId }
             .flatMapLatest { chanId ->
                 if (chanId.isNullOrBlank()) flowOf(emptyList())
                 else channelRepo.observeChannelPosts(chanId)
@@ -185,7 +188,8 @@ class UChatViewModel(
             .toUiState("channel posts")
 
     val callsState: StateFlow<UiState<List<CallRecord>>> =
-        callRepo.observeCalls(currentUserId).toUiState("calls")
+        _profileRetryTick.flatMapLatest { callRepo.observeCalls(currentUserId) }
+            .toUiState("calls")
 
     init {
         viewModelScope.launch {

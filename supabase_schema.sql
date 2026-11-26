@@ -408,3 +408,9 @@ create policy "uchat_media_auth_upload" on storage.objects
 drop policy if exists "uchat_media_auth_update" on storage.objects;
 create policy "uchat_media_auth_update" on storage.objects
   for update to anon, authenticated using (bucket_id = 'uchat-media');
+
+-- Ensure PostgREST roles have explicit table/function privileges and reload schema cache immediately
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on all tables in schema public to anon, authenticated;
+grant execute on function public.uchat_uid() to anon, authenticated;
+notify pgrst, 'reload schema';
