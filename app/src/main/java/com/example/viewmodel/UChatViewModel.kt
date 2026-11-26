@@ -774,6 +774,22 @@ class UChatViewModel(
         }
     }
 
+    fun deleteSelectedCallLogs(callIds: Set<String>) {
+        if (callIds.isEmpty()) return
+        val calls = (callsState.value as? UiState.Success)?.data ?: return
+        val targets = calls.filter { it.id in callIds }
+        if (targets.isEmpty()) return
+        viewModelScope.launch {
+            callRepo.deleteCallLogs(targets)
+                .onSuccess { deleted ->
+                    if (deleted > 0) {
+                        showStatus(if (deleted == 1) "Call log deleted" else "$deleted call logs deleted")
+                    }
+                }
+                .onFailure { showStatus(it.message ?: "Could not delete selected call logs") }
+        }
+    }
+
     fun clearCallHistory() {
         val calls = (callsState.value as? UiState.Success)?.data ?: return
         viewModelScope.launch {

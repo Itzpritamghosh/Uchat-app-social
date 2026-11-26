@@ -195,21 +195,27 @@ class CallRepository(
         }
     }
 
-    suspend fun clearCallHistory(calls: List<CallRecord>): Result<Unit> {
+    suspend fun deleteCallLogs(calls: List<CallRecord>): Result<Int> {
         val uid = try { requireUserId() } catch (e: Exception) { return Result.failure(e) }
-        val completed = calls.filter { !it.activeCall() && uid in it.participantUids }.take(40)
-        if (completed.isEmpty()) return Result.success(Unit)
+        val deletable = calls
+            .filter { !it.activeCall() && uid in it.participantUids && it.id.isNotBlank() }
+            .distinctBy { it.id }
+            .take(50)
+        if (deletable.isEmpty()) return Result.success(0)
         return try {
-            completed.forEach { call ->
+            deletable.forEach { call ->
                 supabase.restDelete("calls", listOf("id" to "eq.${call.id}"))
             }
-            Result.success(Unit)
+            Result.success(deletable.size)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
+
+    suspend fun clearCallHistory(calls: List<CallRecord>): Result<Unit> =
+        deleteCallLogs(calls).map { Unit }
 
     private fun parseCall(obj: JSONObject): CallRecord =
         CallRecord(

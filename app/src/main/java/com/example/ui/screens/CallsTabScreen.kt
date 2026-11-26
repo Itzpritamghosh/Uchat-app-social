@@ -6,14 +6,17 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,10 +45,14 @@ import androidx.compose.material.icons.filled.AddIcCall
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.AlertDialog
@@ -126,22 +133,106 @@ fun CallsTabScreen(
 
     var showNewCallSheet by remember { mutableStateOf(false) }
     var confirmClearHistory by remember { mutableStateOf(false) }
+    var selectedCallIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var confirmDeleteSelected by remember { mutableStateOf(false) }
+
+    val allCalls = (callsState as? UiState.Success)?.data ?: emptyList()
+    val deletableCallIds = remember(allCalls) {
+        allCalls.filter { !it.activeCall() }.map { it.id }.toSet()
+    }
+    val inSelectionMode = selectedCallIds.isNotEmpty()
+
+    LaunchedEffect(deletableCallIds) {
+        if (selectedCallIds.isNotEmpty()) {
+            selectedCallIds = selectedCallIds.intersect(deletableCallIds)
+        }
+    }
+
+    BackHandler(enabled = inSelectionMode) {
+        selectedCallIds = emptySet()
+    }
+
+    fun toggleCallSelection(call: CallRecord) {
+        if (call.activeCall()) return
+        selectedCallIds = if (call.id in selectedCallIds) {
+            selectedCallIds - call.id
+        } else {
+            selectedCallIds + call.id
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 20.dp, end = 12.dp, top = 14.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("Calls", style = MaterialTheme.typography.headlineMedium)
-                IconButton(
-                    onClick = { confirmClearHistory = true },
-                    modifier = Modifier.testTag("calls_clear_history_button")
+            if (inSelectionMode) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(Icons.Filled.DeleteSweep, contentDescription = "Clear call history")
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 8.dp, end = 8.dp, top = 10.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = { selectedCallIds = emptySet() },
+                                modifier = Modifier.testTag("calls_selection_close_button")
+                            ) {
+                                Icon(Icons.Filled.Close, contentDescription = "Cancel selection")
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "${selectedCallIds.size} selected",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = {
+                                    selectedCallIds = if (selectedCallIds.size == deletableCallIds.size) {
+                                        emptySet()
+                                    } else {
+                                        deletableCallIds
+                                    }
+                                },
+                                modifier = Modifier.testTag("calls_select_all_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.SelectAll,
+                                    contentDescription = "Select all call logs"
+                                )
+                            }
+                            IconButton(
+                                onClick = { confirmDeleteSelected = true },
+                                modifier = Modifier.testTag("calls_delete_selected_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Delete,
+                                    contentDescription = "Delete selected call logs",
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 20.dp, end = 12.dp, top = 14.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Calls", style = MaterialTheme.typography.headlineMedium)
+                    IconButton(
+                        onClick = { confirmClearHistory = true },
+                        modifier = Modifier.testTag("calls_clear_history_button")
+                    ) {
+                        Icon(Icons.Filled.DeleteSweep, contentDescription = "Clear call history")
+                    }
                 }
             }
 
@@ -175,10 +266,15 @@ fun CallsTabScreen(
                         ) {
                             items(state.data, key = { it.id }) { call ->
                                 val peerProfile = profileByUid[call.peerUid(myUid)]
+                                val isSelected = call.id in selectedCallIds
                                 CallHistoryRow(
                                     call = call,
                                     myUid = myUid,
                                     avatarBase64 = peerProfile?.avatarBase64,
+                                    selected = isSelected,
+                                    inSelectionMode = inSelectionMode,
+                                    onLongPress = { toggleCallSelection(call) },
+                                    onToggleSelect = { toggleCallSelection(call) },
                                     onCallback = { callType ->
                                         val target = peerProfile ?: UserProfile(
                                             userId = call.peerUid(myUid),
@@ -199,18 +295,51 @@ fun CallsTabScreen(
             }
         }
 
-        FloatingActionButton(
-            onClick = { showNewCallSheet = true },
-            containerColor = MaterialTheme.colorScheme.primary,
-            contentColor = MaterialTheme.colorScheme.onPrimary,
-            shape = RoundedCornerShape(18.dp),
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(20.dp)
-                .testTag("fab_new_call")
-        ) {
-            Icon(Icons.Filled.AddIcCall, contentDescription = "Start new call")
+        if (!inSelectionMode) {
+            FloatingActionButton(
+                onClick = { showNewCallSheet = true },
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(20.dp)
+                    .testTag("fab_new_call")
+            ) {
+                Icon(Icons.Filled.AddIcCall, contentDescription = "Start new call")
+            }
         }
+    }
+
+    if (confirmDeleteSelected && selectedCallIds.isNotEmpty()) {
+        val count = selectedCallIds.size
+        AlertDialog(
+            onDismissRequest = { confirmDeleteSelected = false },
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            title = { Text(if (count == 1) "Delete Call Log" else "Delete $count Call Logs") },
+            text = {
+                Text(
+                    if (count == 1) {
+                        "Remove the selected call entry from your call log?"
+                    } else {
+                        "Remove the $count selected call entries from your call log?"
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.deleteSelectedCallLogs(selectedCallIds)
+                        selectedCallIds = emptySet()
+                        confirmDeleteSelected = false
+                    },
+                    modifier = Modifier.testTag("calls_confirm_delete_selected_button")
+                ) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteSelected = false }) { Text("Cancel") }
+            }
+        )
     }
 
     if (confirmClearHistory) {
@@ -286,11 +415,16 @@ fun CallsTabScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CallHistoryRow(
     call: CallRecord,
     myUid: String,
     avatarBase64: String?,
+    selected: Boolean,
+    inSelectionMode: Boolean,
+    onLongPress: () -> Unit,
+    onToggleSelect: () -> Unit,
     onCallback: (String) -> Unit
 ) {
     val extended = LocalUChatColors.current
@@ -306,12 +440,40 @@ private fun CallHistoryRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onCallback(call.callType) }
+            .background(
+                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                else Color.Transparent
+            )
+            .combinedClickable(
+                onClick = {
+                    if (inSelectionMode) onToggleSelect() else onCallback(call.callType)
+                },
+                onLongClick = onLongPress
+            )
             .padding(horizontal = 16.dp, vertical = 12.dp)
             .testTag("call_history_row_${call.id}"),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        UserAvatar(name = call.peerName(myUid), avatarBase64 = avatarBase64, size = 48.dp)
+        Box {
+            UserAvatar(name = call.peerName(myUid), avatarBase64 = avatarBase64, size = 48.dp)
+            if (selected) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.background),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.CheckCircle,
+                        contentDescription = "Selected",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
         Spacer(Modifier.width(14.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -331,11 +493,13 @@ private fun CallHistoryRow(
                 )
             }
         }
-        IconButton(onClick = { onCallback("audio") }) {
-            Icon(Icons.Filled.Call, contentDescription = "Audio callback", tint = MaterialTheme.colorScheme.primary)
-        }
-        IconButton(onClick = { onCallback("video") }) {
-            Icon(Icons.Filled.Videocam, contentDescription = "Video callback", tint = MaterialTheme.colorScheme.primary)
+        if (!inSelectionMode) {
+            IconButton(onClick = { onCallback("audio") }) {
+                Icon(Icons.Filled.Call, contentDescription = "Audio callback", tint = MaterialTheme.colorScheme.primary)
+            }
+            IconButton(onClick = { onCallback("video") }) {
+                Icon(Icons.Filled.Videocam, contentDescription = "Video callback", tint = MaterialTheme.colorScheme.primary)
+            }
         }
     }
 }
