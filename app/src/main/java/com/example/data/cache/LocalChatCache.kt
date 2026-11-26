@@ -3,6 +3,8 @@ package com.example.data.cache
 import android.content.Context
 import android.util.Log
 import com.example.data.model.AppTimestamp
+import com.example.data.model.CallRecord
+import com.example.data.model.Channel
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatPref
 import com.example.data.model.Conversation
@@ -39,6 +41,9 @@ class LocalChatCache(private val appContext: Context) {
     private val conversationsMem = ConcurrentHashMap<String, List<Conversation>>()
     private val chatPrefsMem = ConcurrentHashMap<String, Map<String, ChatPref>>()
     private val messagesMem = ConcurrentHashMap<String, List<ChatMessage>>()
+    private val callsMem = ConcurrentHashMap<String, List<CallRecord>>()
+    @Volatile
+    private var channelsMem: List<Channel>? = null
     @Volatile
     private var discoverableProfilesMem: List<UserProfile>? = null
 
@@ -187,11 +192,54 @@ class LocalChatCache(private val appContext: Context) {
         writeFileAtomicAsync(File(userDir(userId), "discoverable_profiles.json"), arr.toString())
     }
 
+    fun getCalls(userId: String): List<CallRecord>? {
+        callsMem[userId]?.let { return it }
+        val text = readFileText(File(userDir(userId), "calls.json")) ?: return null
+        return runCatching {
+            val arr = JSONArray(text)
+            List(arr.length()) { i -> decodeCall(arr.getJSONObject(i)) }
+                .filter { !it.activeCall() }
+        }.getOrNull()?.also {
+            callsMem[userId] = it
+        }
+    }
+
+    fun putCalls(userId: String, calls: List<CallRecord>) {
+        // Cache only completed call history so stale ringing calls never reappear on cold start
+        val history = calls.filter { !it.activeCall() }.take(50)
+        callsMem[userId] = history
+        val arr = JSONArray().apply {
+            history.forEach { put(encodeCall(it)) }
+        }
+        writeFileAtomicAsync(File(userDir(userId), "calls.json"), arr.toString())
+    }
+
+    fun getChannels(userId: String): List<Channel>? {
+        channelsMem?.let { return it }
+        val text = readFileText(File(userDir(userId), "channels.json")) ?: return null
+        return runCatching {
+            val arr = JSONArray(text)
+            List(arr.length()) { i -> decodeChannel(arr.getJSONObject(i)) }
+        }.getOrNull()?.also {
+            channelsMem = it
+        }
+    }
+
+    fun putChannels(userId: String, channels: List<Channel>) {
+        channelsMem = channels
+        val arr = JSONArray().apply {
+            channels.take(80).forEach { put(encodeChannel(it, forDisk = true)) }
+        }
+        writeFileAtomicAsync(File(userDir(userId), "channels.json"), arr.toString())
+    }
+
     fun clearUserCache(userId: String) {
         profileMem.remove(userId)
         settingsMem.remove(userId)
         conversationsMem.remove(userId)
         chatPrefsMem.remove(userId)
+        callsMem.remove(userId)
+        channelsMem = null
         discoverableProfilesMem = null
         val prefix = "$userId|"
         messagesMem.keys.filter { it.startsWith(prefix) }.forEach { messagesMem.remove(it) }
@@ -389,6 +437,68 @@ class LocalChatCache(private val appContext: Context) {
         readBy = jsonArrayToStringList(o.optJSONArray("readBy")),
         starredBy = jsonArrayToStringList(o.optJSONArray("starredBy")),
         reactions = jsonObjectToStringMap(o.optJSONObject("reactions")),
+        createdAt = if (o.has("createdAt") && !o.isNull("createdAt")) AppTimestamp(o.optLong("createdAt")) else null,
+        updatedAt = if (o.has("updatedAt") && !o.isNull("updatedAt")) AppTimestamp(o.optLong("updatedAt")) else null
+    )
+
+    private fun encodeCall(c: CallRecord): JSONObject = JSONObject().apply {
+        put("id", c.id)
+        put("callerId", c.callerId)
+        put("callerName", c.callerName)
+        put("callerUsername", c.callerUsername)
+        put("calleeId", c.calleeId)
+        put("calleeName", c.calleeName)
+        put("calleeUsername", c.calleeUsername)
+        put("participantUids", listToJsonArray(c.participantUids))
+        put("callType", c.callType)
+        put("status", c.status)
+        put("durationSec", c.durationSec)
+        c.createdAt?.epochMillis?.let { put("createdAt", it) }
+        c.updatedAt?.epochMillis?.let { put("updatedAt", it) }
+    }
+
+    private fun decodeCall(o: JSONObject): CallRecord = CallRecord(
+        id = o.optString("id", ""),
+        callerId = o.optString("callerId", ""),
+        callerName = o.optString("callerName", ""),
+        callerUsername = o.optString("callerUsername", ""),
+        calleeId = o.optString("calleeId", ""),
+        calleeName = o.optString("calleeName", ""),
+        calleeUsername = o.optString("calleeUsername", ""),
+        participantUids = jsonArrayToStringList(o.optJSONArray("participantUids")),
+        callType = o.optString("callType", "audio"),
+        status = o.optString("status", "ended"),
+        durationSec = o.optLong("durationSec", 0L),
+        createdAt = if (o.has("createdAt") && !o.isNull("createdAt")) AppTimestamp(o.optLong("createdAt")) else null,
+        updatedAt = if (o.has("updatedAt") && !o.isNull("updatedAt")) AppTimestamp(o.optLong("updatedAt")) else null
+    )
+
+    private fun encodeChannel(c: Channel, forDisk: Boolean): JSONObject = JSONObject().apply {
+        put("id", c.id)
+        put("name", c.name)
+        put("description", c.description)
+        put("ownerId", c.ownerId)
+        put("ownerName", c.ownerName)
+        trimMediaForDisk(c.avatarBase64, forDisk)?.let { put("avatarBase64", it) }
+        put("followerCount", c.followerCount)
+        put("discoverable", c.discoverable)
+        put("lastPostText", c.lastPostText)
+        c.lastPostAt?.epochMillis?.let { put("lastPostAt", it) }
+        c.createdAt?.epochMillis?.let { put("createdAt", it) }
+        c.updatedAt?.epochMillis?.let { put("updatedAt", it) }
+    }
+
+    private fun decodeChannel(o: JSONObject): Channel = Channel(
+        id = o.optString("id", ""),
+        name = o.optString("name", ""),
+        description = o.optString("description", ""),
+        ownerId = o.optString("ownerId", ""),
+        ownerName = o.optString("ownerName", ""),
+        avatarBase64 = optNullableString(o, "avatarBase64"),
+        followerCount = o.optLong("followerCount", 1L),
+        discoverable = o.optBoolean("discoverable", true),
+        lastPostText = o.optString("lastPostText", ""),
+        lastPostAt = if (o.has("lastPostAt") && !o.isNull("lastPostAt")) AppTimestamp(o.optLong("lastPostAt")) else null,
         createdAt = if (o.has("createdAt") && !o.isNull("createdAt")) AppTimestamp(o.optLong("createdAt")) else null,
         updatedAt = if (o.has("updatedAt") && !o.isNull("updatedAt")) AppTimestamp(o.optLong("updatedAt")) else null
     )

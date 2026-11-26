@@ -91,7 +91,7 @@ class SupabaseClient(
     val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectionPool(ConnectionPool(10, 5, TimeUnit.MINUTES))
         .retryOnConnectionFailure(true)
-        .connectTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
         .writeTimeout(25, TimeUnit.SECONDS)
         .pingInterval(25, TimeUnit.SECONDS)
@@ -309,8 +309,8 @@ class SupabaseClient(
         var lastRefreshMs = System.currentTimeMillis()
         refreshTrigger.collect {
             val elapsed = System.currentTimeMillis() - lastRefreshMs
-            if (elapsed < 100L) {
-                delay(100L - elapsed)
+            if (elapsed < 40L) {
+                delay(40L - elapsed)
             }
             lastRefreshMs = System.currentTimeMillis()
             try {

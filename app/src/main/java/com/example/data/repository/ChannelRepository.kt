@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import com.example.data.cache.LocalChatCache
 import com.example.data.model.AppTimestamp
 import com.example.data.model.Channel
 import com.example.data.model.ChannelPost
@@ -16,7 +17,8 @@ import java.util.Locale
 import java.util.TimeZone
 
 class ChannelRepository(
-    private val supabase: SupabaseClient
+    private val supabase: SupabaseClient,
+    private val cache: LocalChatCache? = null
 ) {
     private fun requireUserId(): String = supabase.requireUserId()
 
@@ -25,13 +27,20 @@ class ChannelRepository(
     }.format(Date())
 
     fun observePublicChannels(): Flow<List<Channel>> =
-        supabase.observeTable(setOf("channels"), fallbackPollMs = 12_000L) {
+        supabase.observeTable(
+            tables = setOf("channels"),
+            fallbackPollMs = 12_000L,
+            initialCached = { supabase.currentUserId()?.let { cache?.getChannels(it) } }
+        ) {
             val rows = supabase.restGet(
                 table = "channels",
                 queryParams = listOf("discoverable" to "eq.true", "order" to "created_at.desc")
             )
             List(rows.length()) { idx -> parseChannel(rows.getJSONObject(idx)) }
                 .sortedByDescending { it.lastPostAt ?: it.createdAt ?: AppTimestamp(0L) }
+                .also { list ->
+                    supabase.currentUserId()?.let { cache?.putChannels(it, list) }
+                }
         }
 
     fun observeFollowedChannels(userId: String): Flow<Set<String>> =

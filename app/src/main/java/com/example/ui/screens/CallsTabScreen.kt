@@ -520,6 +520,7 @@ fun ActiveCallOverlay(
     customRingtoneUri: String?,
     soundEnabled: Boolean,
     candidatesFlow: Flow<List<IceCandidateRecord>>,
+    autoAcceptIncoming: Boolean = false,
     onPublishOffer: (String) -> Unit,
     onAcceptWithAnswer: (String) -> Unit,
     onMarkConnected: () -> Unit,
@@ -535,15 +536,24 @@ fun ActiveCallOverlay(
     var micMuted by remember(call.id) { mutableStateOf(false) }
     var speakerOn by remember(call.id) { mutableStateOf(isVideo) }
     var cameraOn by remember(call.id) { mutableStateOf(isVideo) }
-    var useFrontCamera by remember(call.id) { mutableStateOf(true) }
+    var remoteFirstFrameRendered by remember(call.id) { mutableStateOf(false) }
     var controlsVisible by remember(call.id) { mutableStateOf(true) }
     var elapsedSec by remember(call.id) { mutableLongStateOf(0L) }
-    var calleeAccepted by remember(call.id) { mutableStateOf(isOutgoing || call.status != "ringing") }
+    var calleeAccepted by remember(call.id) {
+        mutableStateOf(isOutgoing || call.status != "ringing" || autoAcceptIncoming)
+    }
     var offerPublished by remember(call.id) { mutableStateOf(false) }
     var lastAppliedOffer by remember(call.id) { mutableStateOf<String?>(null) }
     var lastAppliedAnswer by remember(call.id) { mutableStateOf<String?>(null) }
     var iceRestartAttempted by remember(call.id) { mutableStateOf(false) }
     var iceNotice by remember(call.id) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(call.id, autoAcceptIncoming) {
+        if (autoAcceptIncoming && !isOutgoing && !calleeAccepted) {
+            CallAudioController.stopAllTones()
+            calleeAccepted = true
+        }
+    }
 
     var hasAudioPermission by remember {
         mutableStateOf(
@@ -738,8 +748,10 @@ fun ActiveCallOverlay(
         }
     }
 
-    val hasRemoteVideo = isVideo && rtcEngine != null && rtcState.remoteVideoTrack != null
+    val hasRemoteVideoTrack = isVideo && rtcEngine != null && rtcState.remoteVideoTrack != null
+    val hasRemoteVideo = hasRemoteVideoTrack && (remoteFirstFrameRendered || isLiveConnected)
     val hasLocalVideo = isVideo && rtcEngine != null && rtcState.localVideoTrack != null && cameraOn
+    val isFrontCamera = rtcState.isFrontCamera
 
     // Edge-to-edge full-screen root Box (NO statusBarsPadding here so video renders right behind the transparent status bar!)
     Box(
@@ -764,6 +776,7 @@ fun ActiveCallOverlay(
             val remoteTrack = rtcState.remoteVideoTrack
             val localTrack = rtcState.localVideoTrack
 
+            // Remote video stays mounted on bottom SurfaceView as soon as remoteTrack exists
             if (remoteTrack != null) {
                 key("remote_video_${call.id}") {
                     WebRtcVideoRenderer(
@@ -771,28 +784,31 @@ fun ActiveCallOverlay(
                         eglBaseContext = rtcEngine.eglBase.eglBaseContext,
                         mirror = false,
                         zOrderMediaOverlay = false,
+                        onFirstFrameRendered = { remoteFirstFrameRendered = true },
                         modifier = Modifier
                             .fillMaxSize()
                             .testTag("webrtc_remote_video_view")
                     )
                 }
-            } else if (localTrack != null && cameraOn) {
+            }
+
+            // Full-screen local preview while waiting for first remote frame, then switches cleanly to PiP
+            if (localTrack != null && cameraOn && !hasRemoteVideo) {
                 key("local_full_preview_${call.id}") {
                     WebRtcVideoRenderer(
                         videoTrack = localTrack,
                         eglBaseContext = rtcEngine.eglBase.eglBaseContext,
-                        mirror = useFrontCamera,
-                        zOrderMediaOverlay = false,
+                        mirror = isFrontCamera,
+                        zOrderMediaOverlay = remoteTrack != null,
                         modifier = Modifier
                             .fillMaxSize()
                             .testTag("webrtc_local_preview_view")
                     )
                 }
-                // Soft vignette over self-preview while waiting for peer video
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.28f))
+                        .background(Color.Black.copy(alpha = 0.25f))
                 )
             }
 
@@ -820,8 +836,8 @@ fun ActiveCallOverlay(
                     )
             )
 
-            // Floating Local Camera PiP (top-right, below transparent status bar; tap to flip camera)
-            if (remoteTrack != null && localTrack != null && cameraOn) {
+            // Floating Local Camera PiP once remote video is live (top-right; tap to flip camera)
+            if (hasRemoteVideo && localTrack != null && cameraOn) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -830,8 +846,7 @@ fun ActiveCallOverlay(
                         .size(width = 112.dp, height = 158.dp)
                         .clip(RoundedCornerShape(18.dp))
                         .border(1.5.dp, Color.White.copy(alpha = 0.65f), RoundedCornerShape(18.dp))
-                        .clickable {
-                            useFrontCamera = !useFrontCamera
+                        .clickable(enabled = !rtcState.isSwitchingCamera) {
                             rtcEngine.switchCamera()
                         }
                 ) {
@@ -839,7 +854,7 @@ fun ActiveCallOverlay(
                         WebRtcVideoRenderer(
                             videoTrack = localTrack,
                             eglBaseContext = rtcEngine.eglBase.eglBaseContext,
-                            mirror = useFrontCamera,
+                            mirror = isFrontCamera,
                             zOrderMediaOverlay = true,
                             modifier = Modifier
                                 .fillMaxSize()
@@ -1086,12 +1101,13 @@ fun ActiveCallOverlay(
                         )
                         CallCircleButton(
                             icon = Icons.Filled.Cameraswitch,
-                            label = "Flip",
-                            bg = Color.White.copy(alpha = 0.16f),
+                            label = if (rtcState.isSwitchingCamera) "Flipping" else "Flip",
+                            bg = if (rtcState.isSwitchingCamera) Color.White.copy(alpha = 0.30f) else Color.White.copy(alpha = 0.16f),
                             buttonSizeDp = 52,
                             onClick = {
-                                useFrontCamera = !useFrontCamera
-                                rtcEngine?.switchCamera()
+                                if (!rtcState.isSwitchingCamera) {
+                                    rtcEngine?.switchCamera()
+                                }
                             },
                             testTag = "call_camera_flip_button"
                         )

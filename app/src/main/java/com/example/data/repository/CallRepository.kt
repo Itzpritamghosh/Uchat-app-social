@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import com.example.data.cache.LocalChatCache
 import com.example.data.model.AppTimestamp
 import com.example.data.model.CallRecord
 import com.example.data.model.IceCandidateRecord
@@ -17,7 +18,8 @@ import java.util.Locale
 import java.util.TimeZone
 
 class CallRepository(
-    private val supabase: SupabaseClient
+    private val supabase: SupabaseClient,
+    private val cache: LocalChatCache? = null
 ) {
     private fun requireUserId(): String = supabase.requireUserId()
 
@@ -26,7 +28,11 @@ class CallRepository(
     }.format(Date())
 
     fun observeCalls(userId: String): Flow<List<CallRecord>> =
-        supabase.observeTable(setOf("calls"), fallbackPollMs = 1_500L) {
+        supabase.observeTable(
+            tables = setOf("calls"),
+            fallbackPollMs = 1_500L,
+            initialCached = { cache?.getCalls(userId) }
+        ) {
             val rows = supabase.restGet(
                 table = "calls",
                 queryParams = listOf(
@@ -35,7 +41,9 @@ class CallRepository(
                     "limit" to "50"
                 )
             )
-            List(rows.length()) { idx -> parseCall(rows.getJSONObject(idx)) }
+            List(rows.length()) { idx -> parseCall(rows.getJSONObject(idx)) }.also { list ->
+                cache?.putCalls(userId, list)
+            }
         }
 
     fun observeIceCandidates(callId: String, userId: String): Flow<List<IceCandidateRecord>> =

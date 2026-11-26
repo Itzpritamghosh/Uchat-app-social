@@ -1,12 +1,19 @@
 package com.example
 
+import android.Manifest
+import android.content.Intent
 import android.graphics.Color as AndroidColor
+import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,6 +23,9 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
@@ -82,6 +92,8 @@ import com.example.data.supabase.UChatAuthManager
 import com.example.data.update.AppUpdateChecker
 import com.example.data.update.AppUpdateState
 import com.example.media.NotificationHelper
+import com.example.service.UChatAppVisibility
+import com.example.service.UChatRealtimeService
 import com.example.ui.components.EmptyStateCard
 import com.example.ui.screens.ActiveCallOverlay
 import com.example.ui.screens.AuthScreen
@@ -96,24 +108,63 @@ import com.example.ui.theme.LocalUChatColors
 import com.example.ui.theme.UChatTheme
 import com.example.viewmodel.UChatViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private val _pendingNotificationIntent = MutableStateFlow<Intent?>(null)
+    private val pendingNotificationIntent: StateFlow<Intent?> = _pendingNotificationIntent.asStateFlow()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        } else {
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            )
+        }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT)
         )
         NotificationHelper.ensureChannels(this)
+        captureNotificationIntent(intent)
         setContent {
-            UChatAppRoot()
+            UChatAppRoot(
+                pendingIntentFlow = pendingNotificationIntent,
+                onConsumePendingIntent = { _pendingNotificationIntent.value = null }
+            )
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureNotificationIntent(intent)
+    }
+
+    private fun captureNotificationIntent(intent: Intent?) {
+        if (intent == null) return
+        val hasTarget = intent.hasExtra(NotificationHelper.EXTRA_CONVERSATION_ID) ||
+            intent.hasExtra(NotificationHelper.EXTRA_CALL_ID) ||
+            intent.hasExtra(NotificationHelper.EXTRA_ACCEPT_CALL_ID)
+        if (hasTarget) {
+            _pendingNotificationIntent.value = Intent(intent)
         }
     }
 }
 
 @Composable
-fun UChatAppRoot() {
+fun UChatAppRoot(
+    pendingIntentFlow: StateFlow<Intent?>,
+    onConsumePendingIntent: () -> Unit
+) {
     val context = LocalContext.current
     val authManager = remember(context) { UChatAuthManager(context.applicationContext) }
     val supabase = remember(authManager) { SupabaseClient(authManager) }
@@ -144,7 +195,9 @@ fun UChatAppRoot() {
                 currentUserId = activeSession.userId,
                 suggestedDisplayName = activeSession.displayName,
                 suggestedUsername = activeSession.username,
-                supabase = supabase
+                supabase = supabase,
+                pendingIntentFlow = pendingIntentFlow,
+                onConsumePendingIntent = onConsumePendingIntent
             )
         }
     }
@@ -169,7 +222,9 @@ private fun AuthenticatedUChatApp(
     currentUserId: String,
     suggestedDisplayName: String,
     suggestedUsername: String,
-    supabase: SupabaseClient
+    supabase: SupabaseClient,
+    pendingIntentFlow: StateFlow<Intent?>,
+    onConsumePendingIntent: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -187,8 +242,8 @@ private fun AuthenticatedUChatApp(
                     currentUserId = currentUserId,
                     profileRepo = ProfileRepository(supabase, localCache),
                     chatRepo = ChatRepository(supabase, localCache),
-                    channelRepo = ChannelRepository(supabase),
-                    callRepo = CallRepository(supabase),
+                    channelRepo = ChannelRepository(supabase, localCache),
+                    callRepo = CallRepository(supabase, localCache),
                     localCache = localCache,
                     updateChecker = updateChecker
                 )
@@ -207,18 +262,54 @@ private fun AuthenticatedUChatApp(
     val callsState by viewModel.callsState.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
+    val pendingNotificationIntent by pendingIntentFlow.collectAsStateWithLifecycle()
     val hasAppUpdate = updateState is AppUpdateState.UpdateAvailable
 
     val snackbarHostState = remember { SnackbarHostState() }
     val lifecycleOwner = LocalLifecycleOwner.current
+    var pendingAutoAcceptCallId by remember { mutableStateOf<String?>(null) }
 
-    // Non-blocking background update check so Settings shows an update badge automatically
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        UChatRealtimeService.start(context)
+    }
+
+    // Start background push notification service, request Android 13+ notification permission, and check updates
     LaunchedEffect(currentUserId) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !NotificationHelper.hasNotificationPermission(context)
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        UChatRealtimeService.start(context)
         viewModel.checkForAppUpdate(silent = true)
+    }
+
+    // Handle deep links from incoming message & lockscreen call push notifications
+    LaunchedEffect(pendingNotificationIntent) {
+        val intent = pendingNotificationIntent ?: return@LaunchedEffect
+        val convId = intent.getStringExtra(NotificationHelper.EXTRA_CONVERSATION_ID)
+        val acceptCallId = intent.getStringExtra(NotificationHelper.EXTRA_ACCEPT_CALL_ID)
+        val callId = intent.getStringExtra(NotificationHelper.EXTRA_CALL_ID)
+        if (!convId.isNullOrBlank()) {
+            viewModel.selectTab(MainTab.CHATS)
+            viewModel.openConversation(convId)
+        }
+        if (!acceptCallId.isNullOrBlank()) {
+            pendingAutoAcceptCallId = acceptCallId
+            NotificationHelper.cancelCallNotification(context, acceptCallId)
+        } else if (!callId.isNullOrBlank()) {
+            NotificationHelper.cancelCallNotification(context, callId)
+        }
+        onConsumePendingIntent()
     }
 
     fun performSignOut(markOffline: Boolean) {
         scope.launch {
+            UChatRealtimeService.stop(context)
+            UChatAppVisibility.activeConversationId = null
+            UChatAppVisibility.activeCallId = null
             supabase.disconnectRealtime()
             supabase.auth.signOut(
                 beforeSignOut = {
@@ -232,19 +323,30 @@ private fun AuthenticatedUChatApp(
         }
     }
 
-    // Real-time Supabase presence: online when foregrounded, offline when backgrounded
+    // Keep visibility and Supabase presence synced with lifecycle
     DisposableEffect(lifecycleOwner, currentUserId) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> viewModel.setPresenceOnline(true)
-                Lifecycle.Event.ON_STOP -> viewModel.setPresenceOnline(false)
+                Lifecycle.Event.ON_START -> {
+                    UChatAppVisibility.isForeground = true
+                    viewModel.setPresenceOnline(true)
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    UChatAppVisibility.isForeground = false
+                    viewModel.setPresenceOnline(false)
+                }
                 else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            UChatAppVisibility.isForeground = false
             lifecycleOwner.lifecycle.removeObserver(observer)
         }
+    }
+
+    LaunchedEffect(activeConversationId) {
+        UChatAppVisibility.activeConversationId = activeConversationId
     }
 
     // Periodic foreground heartbeat so stale sessions flip to offline automatically
@@ -264,23 +366,34 @@ private fun AuthenticatedUChatApp(
         }
     }
 
-    // Real-time incoming call notification trigger
+    // Real-time incoming call notification trigger & active call notification cleanup
     val allCalls = (callsState as? UiState.Success)?.data ?: emptyList()
     val activeCall = remember(allCalls) { allCalls.firstOrNull { it.activeCall() } }
     var lastNotifiedCallId by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(activeCall?.id, activeCall?.status) {
-        if (activeCall != null &&
-            activeCall.status == "ringing" &&
-            !activeCall.outgoing(currentUserId) &&
+        UChatAppVisibility.activeCallId = activeCall?.id
+        if (activeCall == null) {
+            lastNotifiedCallId?.let { NotificationHelper.cancelCallNotification(context, it) }
+            lastNotifiedCallId = null
+            pendingAutoAcceptCallId = null
+        } else if (activeCall.status != "ringing") {
+            NotificationHelper.cancelCallNotification(context, activeCall.id)
+            if (pendingAutoAcceptCallId == activeCall.id) {
+                pendingAutoAcceptCallId = null
+            }
+        } else if (!activeCall.outgoing(currentUserId) &&
             settings.callNotif &&
-            lastNotifiedCallId != activeCall.id
+            lastNotifiedCallId != activeCall.id &&
+            !UChatAppVisibility.isForeground
         ) {
             lastNotifiedCallId = activeCall.id
-            NotificationHelper.notifyCall(
+            NotificationHelper.notifyIncomingCall(
                 context = context,
-                title = "Incoming ${activeCall.callType} call",
-                body = "${activeCall.callerName} (@${activeCall.callerUsername}) is calling...",
-                notificationId = activeCall.id.hashCode()
+                callId = activeCall.id,
+                callerName = activeCall.callerName,
+                callerUsername = activeCall.callerUsername,
+                callType = activeCall.callType,
+                soundEnabled = settings.soundEnabled
             )
         }
     }
@@ -451,7 +564,29 @@ private fun AuthenticatedUChatApp(
                                 }
                             }
                         } else {
-                            // Standard Mobile Layout: Fixed Pure Black Bottom Navigation Bar
+                            // Standard Mobile Layout: Ultra-responsive Swipeable Tabs + Fixed Pure Black Bottom Nav
+                            val pagerState = rememberPagerState(
+                                initialPage = selectedTab.ordinal,
+                                pageCount = { UChatTabs.size }
+                            )
+
+                            LaunchedEffect(pagerState.currentPage) {
+                                val targetTab = UChatTabs.getOrNull(pagerState.currentPage)?.tab
+                                if (targetTab != null && targetTab != selectedTab) {
+                                    viewModel.selectTab(targetTab)
+                                }
+                            }
+
+                            LaunchedEffect(selectedTab) {
+                                val targetIndex = selectedTab.ordinal
+                                if (!pagerState.isScrollInProgress && pagerState.currentPage != targetIndex) {
+                                    pagerState.animateScrollToPage(
+                                        page = targetIndex,
+                                        animationSpec = tween(durationMillis = 180)
+                                    )
+                                }
+                            }
+
                             Scaffold(
                                 containerColor = Color.Black,
                                 snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -462,11 +597,19 @@ private fun AuthenticatedUChatApp(
                                         tonalElevation = 0.dp,
                                         windowInsets = WindowInsets.navigationBars
                                     ) {
-                                        UChatTabs.forEach { spec ->
-                                            val selected = selectedTab == spec.tab
+                                        UChatTabs.forEachIndexed { index, spec ->
+                                            val selected = pagerState.currentPage == index
                                             NavigationBarItem(
                                                 selected = selected,
-                                                onClick = { viewModel.selectTab(spec.tab) },
+                                                onClick = {
+                                                    viewModel.selectTab(spec.tab)
+                                                    scope.launch {
+                                                        pagerState.animateScrollToPage(
+                                                            page = index,
+                                                            animationSpec = tween(durationMillis = 180)
+                                                        )
+                                                    }
+                                                },
                                                 icon = {
                                                     val showDot = spec.tab == MainTab.SETTINGS && hasAppUpdate
                                                     BadgedBox(
@@ -499,14 +642,21 @@ private fun AuthenticatedUChatApp(
                                     }
                                 }
                             ) { innerPadding ->
-                                Box(
+                                HorizontalPager(
+                                    state = pagerState,
+                                    beyondViewportPageCount = 1,
+                                    flingBehavior = PagerDefaults.flingBehavior(
+                                        state = pagerState,
+                                        snapPositionalThreshold = 0.20f
+                                    ),
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .padding(innerPadding)
                                         .statusBarsPadding()
-                                ) {
-                                    TabMasterContent(
-                                        selectedTab = selectedTab,
+                                        .testTag("main_tabs_pager")
+                                ) { page ->
+                                    TabPageContent(
+                                        tab = UChatTabs[page].tab,
                                         viewModel = viewModel,
                                         onSignOut = { performSignOut(markOffline = true) }
                                     )
@@ -525,20 +675,27 @@ private fun AuthenticatedUChatApp(
                                 customRingtoneUri = settings.ringtoneUri,
                                 soundEnabled = settings.soundEnabled,
                                 candidatesFlow = candidatesFlow,
+                                autoAcceptIncoming = pendingAutoAcceptCallId == activeCall.id,
                                 onPublishOffer = { offerSdp ->
                                     viewModel.publishSdpOffer(activeCall.id, offerSdp)
                                 },
                                 onAcceptWithAnswer = { answerSdp ->
+                                    NotificationHelper.cancelCallNotification(context, activeCall.id)
                                     viewModel.acceptCall(activeCall, answerSdp)
                                 },
                                 onMarkConnected = {
+                                    NotificationHelper.cancelCallNotification(context, activeCall.id)
                                     viewModel.markCallConnected(activeCall.id)
                                 },
                                 onSendIceCandidate = { sdp, sdpMid, sdpMLineIndex ->
                                     viewModel.sendIceCandidate(activeCall, sdp, sdpMid, sdpMLineIndex)
                                 },
-                                onReject = { viewModel.finishCall(activeCall.id, "rejected", 0L) },
+                                onReject = {
+                                    NotificationHelper.cancelCallNotification(context, activeCall.id)
+                                    viewModel.finishCall(activeCall.id, "rejected", 0L)
+                                },
                                 onEnd = { dur ->
+                                    NotificationHelper.cancelCallNotification(context, activeCall.id)
                                     val terminal = if (activeCall.status == "ringing") "cancelled" else "ended"
                                     viewModel.finishCall(activeCall.id, terminal, dur)
                                 }
@@ -552,26 +709,39 @@ private fun AuthenticatedUChatApp(
 }
 
 @Composable
+private fun TabPageContent(
+    tab: MainTab,
+    viewModel: UChatViewModel,
+    onSignOut: () -> Unit
+) {
+    when (tab) {
+        MainTab.CHATS -> ChatsTabScreen(
+            viewModel = viewModel,
+            onOpenConversation = { viewModel.openConversation(it) }
+        )
+        MainTab.CHANNELS -> ChannelsTabScreen(
+            viewModel = viewModel,
+            onOpenChannel = { viewModel.openChannel(it) }
+        )
+        MainTab.CALLS -> CallsTabScreen(viewModel = viewModel)
+        MainTab.SETTINGS -> SettingsTabScreen(
+            viewModel = viewModel,
+            onSignOut = onSignOut
+        )
+    }
+}
+
+@Composable
 private fun TabMasterContent(
     selectedTab: MainTab,
     viewModel: UChatViewModel,
     onSignOut: () -> Unit
 ) {
     Crossfade(targetState = selectedTab, label = "uchat_tabs") { tab ->
-        when (tab) {
-            MainTab.CHATS -> ChatsTabScreen(
-                viewModel = viewModel,
-                onOpenConversation = { viewModel.openConversation(it) }
-            )
-            MainTab.CHANNELS -> ChannelsTabScreen(
-                viewModel = viewModel,
-                onOpenChannel = { viewModel.openChannel(it) }
-            )
-            MainTab.CALLS -> CallsTabScreen(viewModel = viewModel)
-            MainTab.SETTINGS -> SettingsTabScreen(
-                viewModel = viewModel,
-                onSignOut = onSignOut
-            )
-        }
+        TabPageContent(
+            tab = tab,
+            viewModel = viewModel,
+            onSignOut = onSignOut
+        )
     }
 }

@@ -262,15 +262,18 @@ class UChatViewModel(
                 initialValue = UiState.Loading
             )
 
+    private val initialChannels: UiState<List<Channel>> =
+        localCache?.getChannels(currentUserId)?.let { UiState.Success(it) } ?: UiState.Loading
+
     val channelsState: StateFlow<UiState<List<Channel>>> =
         _profileRetryTick.flatMapLatest { channelRepo.observePublicChannels() }
-            .toUiState("channels")
+            .toUiState("channels", initial = initialChannels, started = SharingStarted.Eagerly)
 
     val followedChannelIdsState: StateFlow<Set<String>> =
         _profileRetryTick.flatMapLatest {
             channelRepo.observeFollowedChannels(currentUserId)
                 .catch { emit(emptySet()) }
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptySet())
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     val activeChannelPostsState: StateFlow<UiState<List<ChannelPost>>> =
         combine(_activeChannelId, _profileRetryTick) { chanId, _ -> chanId }
@@ -280,9 +283,12 @@ class UChatViewModel(
             }
             .toUiState("channel posts")
 
+    private val initialCalls: UiState<List<CallRecord>> =
+        localCache?.getCalls(currentUserId)?.let { UiState.Success(it) } ?: UiState.Loading
+
     val callsState: StateFlow<UiState<List<CallRecord>>> =
         _profileRetryTick.flatMapLatest { callRepo.observeCalls(currentUserId) }
-            .toUiState("calls")
+            .toUiState("calls", initial = initialCalls, started = SharingStarted.Eagerly)
 
     init {
         viewModelScope.launch {

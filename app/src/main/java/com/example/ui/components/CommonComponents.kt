@@ -340,53 +340,88 @@ fun WebRtcVideoRenderer(
     eglBaseContext: EglBase.Context,
     mirror: Boolean,
     zOrderMediaOverlay: Boolean = false,
+    onFirstFrameRendered: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
-    val renderer = remember(eglBaseContext, zOrderMediaOverlay) {
-        SurfaceViewRenderer(context).apply {
-            init(eglBaseContext, null)
-            setEnableHardwareScaler(true)
-            setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
-            setZOrderOnTop(false)
-            setZOrderMediaOverlay(zOrderMediaOverlay)
-            setMirror(mirror)
-            if (zOrderMediaOverlay) {
-                outlineProvider = object : android.view.ViewOutlineProvider() {
-                    override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
-                        val radiusPx = 18f * view.resources.displayMetrics.density
-                        outline.setRoundRect(0, 0, view.width, view.height, radiusPx)
-                    }
-                }
-                clipToOutline = true
-            }
-        }
-    }
+    val latestOnFirstFrame = androidx.compose.runtime.rememberUpdatedState(onFirstFrameRendered)
+    val attachedTrackHolder = remember { arrayOfNulls<VideoTrack>(1) }
+    val rendererHolder = remember { arrayOfNulls<SurfaceViewRenderer>(1) }
 
-    DisposableEffect(renderer, mirror) {
-        runCatching { renderer.setMirror(mirror) }
-        onDispose { }
-    }
-
-    DisposableEffect(renderer, videoTrack) {
-        if (videoTrack != null) {
-            runCatching { videoTrack.addSink(renderer) }
-        }
+    DisposableEffect(eglBaseContext, zOrderMediaOverlay) {
         onDispose {
-            if (videoTrack != null) {
-                runCatching { videoTrack.removeSink(renderer) }
+            val view = rendererHolder[0]
+            val prevTrack = attachedTrackHolder[0]
+            if (view != null && prevTrack != null) {
+                runCatching { prevTrack.removeSink(view) }
             }
-        }
-    }
-
-    DisposableEffect(renderer) {
-        onDispose {
-            runCatching { renderer.release() }
+            attachedTrackHolder[0] = null
+            if (view != null) {
+                runCatching { view.clearImage() }
+                runCatching { view.release() }
+            }
+            rendererHolder[0] = null
         }
     }
 
     AndroidView(
-        factory = { renderer },
+        factory = { ctx ->
+            SurfaceViewRenderer(ctx).apply {
+                layoutParams = android.view.ViewGroup.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                init(
+                    eglBaseContext,
+                    object : RendererCommon.RendererEvents {
+                        override fun onFirstFrameRendered() {
+                            post { latestOnFirstFrame.value?.invoke() }
+                        }
+                        override fun onFrameResolutionChanged(videoWidth: Int, videoHeight: Int, rotation: Int) = Unit
+                    }
+                )
+                setEnableHardwareScaler(true)
+                setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+                setZOrderOnTop(false)
+                setZOrderMediaOverlay(zOrderMediaOverlay)
+                setMirror(mirror)
+                if (zOrderMediaOverlay) {
+                    outlineProvider = object : android.view.ViewOutlineProvider() {
+                        override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
+                            val radiusPx = 18f * view.resources.displayMetrics.density
+                            outline.setRoundRect(0, 0, view.width, view.height, radiusPx)
+                        }
+                    }
+                    clipToOutline = true
+                }
+                rendererHolder[0] = this
+                if (videoTrack != null) {
+                    runCatching {
+                        videoTrack.setEnabled(true)
+                        videoTrack.addSink(this)
+                        attachedTrackHolder[0] = videoTrack
+                    }
+                }
+            }
+        },
+        update = { view ->
+            runCatching { view.setMirror(mirror) }
+            val currentAttached = attachedTrackHolder[0]
+            if (currentAttached !== videoTrack) {
+                if (currentAttached != null) {
+                    runCatching { currentAttached.removeSink(view) }
+                }
+                if (videoTrack != null) {
+                    runCatching {
+                        videoTrack.setEnabled(true)
+                        videoTrack.addSink(view)
+                        attachedTrackHolder[0] = videoTrack
+                    }
+                } else {
+                    attachedTrackHolder[0] = null
+                    runCatching { view.clearImage() }
+                }
+            }
+        },
         modifier = modifier
     )
 }
