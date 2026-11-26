@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">UChat</string>
     <string name="tagline">Private, real-time messaging &amp; calls</string>
-    <string name="sign_in_google">Sign in with Google</string>
+    <string name="sign_in_label">Sign in</string>
     <string name="tab_chats">Chats</string>
     <string name="tab_channels">Channels</string>
     <string name="tab_calls">Calls</string>

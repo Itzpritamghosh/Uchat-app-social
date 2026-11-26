@@ -429,7 +429,7 @@ fun SettingsTabScreen(
                     subtitle = "Zero-trust data isolation & user privacy",
                     onClick = {
                         infoDialogContent = "UChat Terms & Privacy" to
-                            "UChat authenticates your account via Firebase Authentication (Google Sign-In) and never exposes your private email address to other users. " +
+                            "UChat secures your @username account with salted bcrypt password hashing and server-verified session tokens — no email or phone number is required. " +
                             "Only your chosen @username, display name, and public profile status are discoverable. " +
                             "Real-time messages, media in Supabase Storage, and WebRTC calls are protected by strict Postgres Row Level Security policies."
                     }

@@ -3,9 +3,6 @@ package com.example.data.supabase
 import android.util.Base64
 import android.util.Log
 import com.example.BuildConfig
-import com.google.firebase.Firebase
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.auth
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -81,11 +78,11 @@ object SupabaseConfig {
 
 /**
  * Supabase client for real-time messaging, Postgres data sync, WebRTC signaling, and media storage.
- * User authentication is managed strictly by Firebase Auth; every Supabase request requires an
- * active Firebase Auth session and passes the verified Firebase UID for Postgres RLS enforcement.
+ * Authenticates every Postgres request with a cryptographically random server-verified session token
+ * via the x-uchat-token header enforced by Postgres Row Level Security.
  */
 class SupabaseClient(
-    private val auth: FirebaseAuth = Firebase.auth
+    val auth: UChatAuthManager
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val refCounter = AtomicInteger(1)
@@ -105,11 +102,15 @@ class SupabaseClient(
     @Volatile
     private var realtimeStarted = false
 
-    fun currentUserId(): String? = auth.currentUser?.uid?.takeIf { it.isNotBlank() }
+    fun currentUserId(): String? = auth.currentUserId()
 
     fun requireUserId(): String =
         currentUserId()
-            ?: throw IllegalStateException("Please sign in with Google first.")
+            ?: throw IllegalStateException("Please sign in to your UChat account first.")
+
+    private fun requireSessionToken(): String =
+        auth.currentSessionToken()
+            ?: throw IllegalStateException("Please sign in to your UChat account first.")
 
     fun notifyLocalChange(vararg tables: String) {
         tables.forEach { table ->
@@ -307,12 +308,12 @@ class SupabaseClient(
     }
 
     private suspend fun executeAuthedRequest(
-        requestBuilder: (uid: String) -> Request
+        requestBuilder: (sessionToken: String) -> Request
     ): Pair<Int, String> = withContext(Dispatchers.IO) {
         SupabaseConfig.requireConfigured()
-        val uid = requireUserId()
+        val token = requireSessionToken()
         try {
-            httpClient.newCall(requestBuilder(uid)).execute().use { resp ->
+            httpClient.newCall(requestBuilder(token)).execute().use { resp ->
                 resp.code to resp.body?.string().orEmpty()
             }
         } catch (e: UnknownHostException) {
@@ -333,12 +334,12 @@ class SupabaseClient(
         queryParams: List<Pair<String, String>> = emptyList()
     ): JSONArray {
         val url = buildRestUrl(table, queryParams)
-        val (code, text) = executeAuthedRequest { uid ->
+        val (code, text) = executeAuthedRequest { token ->
             Request.Builder()
                 .url(url)
                 .addHeader("apikey", SupabaseConfig.anonKey)
                 .addHeader("Authorization", "Bearer ${SupabaseConfig.anonKey}")
-                .addHeader("x-firebase-uid", uid)
+                .addHeader("x-uchat-token", token)
                 .addHeader("Accept", "application/json")
                 .get()
                 .build()
@@ -359,12 +360,12 @@ class SupabaseClient(
         val url = buildRestUrl(table, params)
         val prefer = if (upsert) "resolution=merge-duplicates,return=representation" else "return=representation"
         val jsonBody = body.toString()
-        val (code, text) = executeAuthedRequest { uid ->
+        val (code, text) = executeAuthedRequest { token ->
             Request.Builder()
                 .url(url)
                 .addHeader("apikey", SupabaseConfig.anonKey)
                 .addHeader("Authorization", "Bearer ${SupabaseConfig.anonKey}")
-                .addHeader("x-firebase-uid", uid)
+                .addHeader("x-uchat-token", token)
                 .addHeader("Content-Type", "application/json")
                 .addHeader("Prefer", prefer)
                 .post(jsonBody.toRequestBody(JSON_TYPE))
@@ -384,12 +385,12 @@ class SupabaseClient(
     ): JSONArray {
         val url = buildRestUrl(table, queryParams)
         val jsonBody = body.toString()
-        val (code, text) = executeAuthedRequest { uid ->
+        val (code, text) = executeAuthedRequest { token ->
             Request.Builder()
                 .url(url)
                 .addHeader("apikey", SupabaseConfig.anonKey)
                 .addHeader("Authorization", "Bearer ${SupabaseConfig.anonKey}")
-                .addHeader("x-firebase-uid", uid)
+                .addHeader("x-uchat-token", token)
                 .addHeader("Content-Type", "application/json")
                 .addHeader("Prefer", "return=representation")
                 .patch(jsonBody.toRequestBody(JSON_TYPE))
@@ -407,12 +408,12 @@ class SupabaseClient(
         queryParams: List<Pair<String, String>>
     ) {
         val url = buildRestUrl(table, queryParams)
-        val (code, text) = executeAuthedRequest { uid ->
+        val (code, text) = executeAuthedRequest { token ->
             Request.Builder()
                 .url(url)
                 .addHeader("apikey", SupabaseConfig.anonKey)
                 .addHeader("Authorization", "Bearer ${SupabaseConfig.anonKey}")
-                .addHeader("x-firebase-uid", uid)
+                .addHeader("x-uchat-token", token)
                 .delete()
                 .build()
         }
@@ -491,7 +492,7 @@ class SupabaseClient(
             code == 401 ->
                 "Supabase rejected the API key (HTTP 401). Check SUPABASE_ANON_KEY in Secrets."
             lower.contains("row-level security") ->
-                "Supabase security policy blocked this request. Run the latest supabase_schema.sql in Supabase SQL Editor."
+                "Session expired or security policy updated. Tap Sign Out and sign back in, or run the latest supabase_schema.sql in Supabase SQL Editor."
             msg.isNotBlank() -> msg
             else -> "Supabase request failed (HTTP $code)"
         }

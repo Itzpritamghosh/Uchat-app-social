@@ -81,33 +81,23 @@ jobs:
 
       - name: Create temporary debug keystore
         shell: bash
-        env:
-          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
           set -euo pipefail
           KEYSTORE_PATH="./debug.keystore"
-          if [ ! -f "$KEYSTORE_PATH" ] && [ -n "${DEBUG_KEYSTORE_BASE64:-}" ]; then
-            printf '%s' "$DEBUG_KEYSTORE_BASE64" | tr -d ' \t\r\n' | base64 -d > "$KEYSTORE_PATH" 2>/dev/null || rm -f "$KEYSTORE_PATH"
-            if [ -f "$KEYSTORE_PATH" ] && ! "${JAVA_HOME}/bin/keytool" -list -keystore "$KEYSTORE_PATH" -storepass android >/dev/null 2>&1; then
-              rm -f "$KEYSTORE_PATH"
-            fi
-          fi
-
           if [ ! -f "$KEYSTORE_PATH" ] && [ -f "./debug.keystore.base64" ]; then
-            tr -d ' \t\r\n' < "./debug.keystore.base64" | base64 -d > "$KEYSTORE_PATH" 2>/dev/null || rm -f "$KEYSTORE_PATH"
+            tr -d ' \t\r\n"'\''' < "./debug.keystore.base64" | base64 -d > "$KEYSTORE_PATH" 2>/dev/null || rm -f "$KEYSTORE_PATH"
             if [ -f "$KEYSTORE_PATH" ] && ! "${JAVA_HOME}/bin/keytool" -list -keystore "$KEYSTORE_PATH" -storepass android >/dev/null 2>&1; then
               rm -f "$KEYSTORE_PATH"
             fi
           fi
 
           if [ -f "$KEYSTORE_PATH" ]; then
-            echo "Project debug keystore decoded and verified (matches Firebase SHA-1)."
+            echo "Debug keystore is ready."
           else
             if [ -z "${JAVA_HOME:-}" ] || [ ! -x "${JAVA_HOME}/bin/keytool" ]; then
               echo "::error::keytool was not found in configured JAVA_HOME."
               exit 1
             fi
-            echo "Generating ephemeral debug keystore (commit debug.keystore.base64 or set DEBUG_KEYSTORE_BASE64 secret for Google One-Tap SHA-1 match)."
             "${JAVA_HOME}/bin/keytool" -genkeypair \
               -keystore "$KEYSTORE_PATH" \
               -storepass android \
@@ -142,22 +132,6 @@ jobs:
             echo "Configured Supabase environment from repository secrets."
           else
             echo "Using .env.example defaults for build (set SUPABASE_URL and SUPABASE_ANON_KEY repository secrets to enable Supabase in the APK)."
-          fi
-
-      - name: Configure Firebase google-services.json (optional secret)
-        shell: bash
-        env:
-          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        run: |
-          set -euo pipefail
-          if [ -n "${GOOGLE_SERVICES_JSON:-}" ]; then
-            printf '%s\n' "$GOOGLE_SERVICES_JSON" > app/google-services.json
-            echo "Wrote app/google-services.json from repository secret."
-          elif [ -f "app/google-services.json" ]; then
-            echo "Using committed app/google-services.json."
-          else
-            echo "::error::app/google-services.json is missing. Commit app/google-services.json or set the GOOGLE_SERVICES_JSON repository secret."
-            exit 1
           fi
 
       - name: Build debug APK

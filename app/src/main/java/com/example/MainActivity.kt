@@ -59,7 +59,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import androidx.credentials.CredentialManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -68,9 +67,6 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.example.data.firebase.attemptAutoSignIn
-import com.example.data.firebase.authStateFlow
-import com.example.data.firebase.signOutUser
 import com.example.data.model.MainTab
 import com.example.data.model.UiState
 import com.example.data.repository.CallRepository
@@ -78,6 +74,7 @@ import com.example.data.repository.ChannelRepository
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.ProfileRepository
 import com.example.data.supabase.SupabaseClient
+import com.example.data.supabase.UChatAuthManager
 import com.example.media.NotificationHelper
 import com.example.ui.components.EmptyStateCard
 import com.example.ui.screens.ActiveCallOverlay
@@ -92,9 +89,8 @@ import com.example.ui.screens.SettingsTabScreen
 import com.example.ui.theme.LocalUChatColors
 import com.example.ui.theme.UChatTheme
 import com.example.viewmodel.UChatViewModel
-import com.google.firebase.Firebase
-import com.google.firebase.auth.auth
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -113,29 +109,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun UChatAppRoot() {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val credentialManager = remember(context) { CredentialManager.create(context) }
-    val supabase = remember { SupabaseClient(Firebase.auth) }
+    val authManager = remember(context) { UChatAuthManager(context.applicationContext) }
+    val supabase = remember(authManager) { SupabaseClient(authManager) }
 
-    val authUser by remember { Firebase.auth.authStateFlow() }
-        .collectAsStateWithLifecycle(initialValue = Firebase.auth.currentUser)
-    var checkingAutoSignIn by remember { mutableStateOf(Firebase.auth.currentUser == null) }
+    val session by authManager.session.collectAsStateWithLifecycle()
+    val initializing by authManager.initializing.collectAsStateWithLifecycle()
 
-    LaunchedEffect(Unit) {
-        if (Firebase.auth.currentUser == null) {
-            attemptAutoSignIn(
-                context = context,
-                credentialManager = credentialManager,
-                onAuthSuccess = { checkingAutoSignIn = false },
-                onUnauthenticated = { checkingAutoSignIn = false },
-                scope = scope
-            )
-        } else {
-            checkingAutoSignIn = false
-        }
-    }
-
-    if (checkingAutoSignIn) {
+    if (initializing) {
         UChatTheme {
             Box(
                 modifier = Modifier.fillMaxSize().background(Color.Black),
@@ -144,21 +124,20 @@ fun UChatAppRoot() {
                 CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             }
         }
-    } else if (authUser == null) {
+    } else if (session == null) {
         UChatTheme {
             AuthScreen(
-                credentialManager = credentialManager,
+                authManager = authManager,
                 onAuthSuccess = {}
             )
         }
     } else {
-        val activeUser = authUser!!
-        key(activeUser.uid) {
+        val activeSession = session!!
+        key(activeSession.userId) {
             AuthenticatedUChatApp(
-                currentUserId = activeUser.uid,
-                suggestedDisplayName = activeUser.displayName.orEmpty(),
-                userEmail = activeUser.email.orEmpty(),
-                credentialManager = credentialManager,
+                currentUserId = activeSession.userId,
+                suggestedDisplayName = activeSession.displayName,
+                suggestedUsername = activeSession.username,
                 supabase = supabase
             )
         }
@@ -183,8 +162,7 @@ private val UChatTabs = listOf(
 private fun AuthenticatedUChatApp(
     currentUserId: String,
     suggestedDisplayName: String,
-    userEmail: String,
-    credentialManager: CredentialManager,
+    suggestedUsername: String,
     supabase: SupabaseClient
 ) {
     val context = LocalContext.current
@@ -220,16 +198,16 @@ private fun AuthenticatedUChatApp(
     val lifecycleOwner = LocalLifecycleOwner.current
 
     fun performSignOut(markOffline: Boolean) {
-        signOutUser(
-            credentialManager = credentialManager,
-            scope = scope,
-            beforeSignOut = {
-                if (markOffline) {
-                    viewModel.markOfflineBeforeSignOut()
+        scope.launch {
+            supabase.disconnectRealtime()
+            supabase.auth.signOut(
+                beforeSignOut = {
+                    if (markOffline) {
+                        viewModel.markOfflineBeforeSignOut()
+                    }
                 }
-                supabase.disconnectRealtime()
-            }
-        )
+            )
+        }
     }
 
     // Real-time Supabase presence: online when foregrounded, offline when backgrounded
@@ -331,7 +309,7 @@ private fun AuthenticatedUChatApp(
                     ProfileSetupScreen(
                         viewModel = viewModel,
                         suggestedDisplayName = suggestedDisplayName,
-                        userEmail = userEmail,
+                        suggestedUsername = suggestedUsername,
                         onSignOut = { performSignOut(markOffline = false) }
                     )
                 } else {
