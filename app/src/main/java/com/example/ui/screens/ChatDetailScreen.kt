@@ -319,9 +319,17 @@ fun ChatDetailScreen(
         else messagesList.filter { it.text.lowercase().contains(q) || (it.mediaName?.lowercase()?.contains(q) == true) }
     }
 
-    LaunchedEffect(filteredMessages.size) {
+    var hasInitiallyPositioned by remember(conversation.id) { mutableStateOf(false) }
+
+    LaunchedEffect(conversation.id, filteredMessages.size) {
         if (filteredMessages.isNotEmpty()) {
-            listState.animateScrollToItem(filteredMessages.lastIndex)
+            val targetIndex = filteredMessages.lastIndex
+            if (!hasInitiallyPositioned) {
+                listState.scrollToItem(targetIndex)
+                hasInitiallyPositioned = true
+            } else {
+                listState.animateScrollToItem(targetIndex)
+            }
         }
     }
 

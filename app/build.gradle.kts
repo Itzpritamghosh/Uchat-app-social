@@ -10,11 +10,25 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
+    val appBuildNumber = (
+      (project.findProperty("UCHAT_BUILD_NUMBER") as? String)
+        ?: System.getenv("UCHAT_BUILD_NUMBER")
+        ?: "1"
+    ).trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
+    val rawGithubRepo = (
+      (project.findProperty("UCHAT_GITHUB_REPO") as? String)
+        ?: System.getenv("UCHAT_GITHUB_REPO")
+        ?: ""
+    ).trim().replace(Regex("[^A-Za-z0-9_./-]"), "")
+
     applicationId = "com.aistudio.uchat.vkmqrx"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = appBuildNumber
+    versionName = "1.$appBuildNumber"
+
+    buildConfigField("int", "APP_BUILD_NUMBER", "$appBuildNumber")
+    buildConfigField("String", "GITHUB_REPO", "\"$rawGithubRepo\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

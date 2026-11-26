@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import com.example.data.cache.LocalChatCache
 import com.example.data.model.AppTimestamp
 import com.example.data.model.BlockedUser
 import com.example.data.model.ContactEntry
@@ -20,7 +21,8 @@ private val USERNAME_REGEX = Regex("^[a-z0-9_]{3,24}$")
 private val SAFE_ID_REGEX = Regex("^[a-zA-Z0-9_-]{4,128}$")
 
 class ProfileRepository(
-    private val supabase: SupabaseClient
+    private val supabase: SupabaseClient,
+    private val cache: LocalChatCache? = null
 ) {
     private fun requireUserId(): String = supabase.requireUserId()
 
@@ -64,16 +66,29 @@ class ProfileRepository(
     }
 
     fun observeMyProfile(userId: String): Flow<UserProfile?> =
-        supabase.observeTable(setOf("profiles"), fallbackPollMs = 12_000L) {
+        supabase.observeTable(
+            tables = setOf("profiles"),
+            fallbackPollMs = 12_000L,
+            initialCached = { cache?.getMyProfile(userId) }
+        ) {
             val rows = supabase.restGet(
                 table = "profiles",
                 queryParams = listOf("id" to "eq.$userId", "limit" to "1")
             )
-            if (rows.length() == 0) null else parseProfile(rows.getJSONObject(0))
+            if (rows.length() == 0) null else parseProfile(rows.getJSONObject(0)).also {
+                cache?.putMyProfile(userId, it)
+            }
         }
 
     fun observeDiscoverableProfiles(): Flow<List<UserProfile>> =
-        supabase.observeTable(setOf("profiles"), fallbackPollMs = 15_000L) {
+        supabase.observeTable(
+            tables = setOf("profiles"),
+            fallbackPollMs = 15_000L,
+            initialCached = {
+                val uid = supabase.currentUserId()
+                if (uid != null) cache?.getDiscoverableProfiles(uid) else null
+            }
+        ) {
             val rows = supabase.restGet(
                 table = "profiles",
                 queryParams = listOf(
@@ -82,7 +97,9 @@ class ProfileRepository(
                     "limit" to "100"
                 )
             )
-            List(rows.length()) { idx -> parseProfile(rows.getJSONObject(idx)) }
+            List(rows.length()) { idx -> parseProfile(rows.getJSONObject(idx)) }.also { list ->
+                supabase.currentUserId()?.let { uid -> cache?.putDiscoverableProfiles(uid, list) }
+            }
         }
 
     fun observeProfilesByIds(userIds: List<String>): Flow<Map<String, UserProfile>> {
@@ -273,12 +290,18 @@ class ProfileRepository(
     }
 
     fun observeSettings(userId: String): Flow<UserSettings> =
-        supabase.observeTable(setOf("user_settings"), fallbackPollMs = 20_000L) {
+        supabase.observeTable(
+            tables = setOf("user_settings"),
+            fallbackPollMs = 20_000L,
+            initialCached = { cache?.getSettings(userId) }
+        ) {
             val rows = supabase.restGet(
                 table = "user_settings",
                 queryParams = listOf("user_id" to "eq.$userId", "limit" to "1")
             )
-            if (rows.length() == 0) UserSettings() else parseSettings(rows.getJSONObject(0))
+            val parsed = if (rows.length() == 0) UserSettings() else parseSettings(rows.getJSONObject(0))
+            cache?.putSettings(userId, parsed)
+            parsed
         }
 
     suspend fun updateSettings(settings: UserSettings): Result<Unit> {

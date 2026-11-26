@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import com.example.data.cache.LocalChatCache
 import com.example.data.model.AppTimestamp
 import com.example.data.model.ChatMessage
 import com.example.data.model.ChatPref
@@ -22,7 +23,8 @@ import java.util.TimeZone
 import java.util.UUID
 
 class ChatRepository(
-    private val supabase: SupabaseClient
+    private val supabase: SupabaseClient,
+    private val cache: LocalChatCache? = null
 ) {
     private fun requireUserId(): String = supabase.requireUserId()
 
@@ -31,7 +33,11 @@ class ChatRepository(
     }.format(Date())
 
     fun observeConversations(userId: String): Flow<List<Conversation>> =
-        supabase.observeTable(setOf("conversations"), fallbackPollMs = 8_000L) {
+        supabase.observeTable(
+            tables = setOf("conversations"),
+            fallbackPollMs = 8_000L,
+            initialCached = { cache?.getConversations(userId) }
+        ) {
             val rows = supabase.restGet(
                 table = "conversations",
                 queryParams = listOf(
@@ -41,10 +47,15 @@ class ChatRepository(
             )
             List(rows.length()) { idx -> parseConversation(rows.getJSONObject(idx)) }
                 .sortedByDescending { it.lastMessageAt ?: it.updatedAt ?: AppTimestamp(0L) }
+                .also { cache?.putConversations(userId, it) }
         }
 
     fun observeChatPrefs(userId: String): Flow<Map<String, ChatPref>> =
-        supabase.observeTable(setOf("chat_prefs"), fallbackPollMs = 15_000L) {
+        supabase.observeTable(
+            tables = setOf("chat_prefs"),
+            fallbackPollMs = 15_000L,
+            initialCached = { cache?.getChatPrefs(userId) }
+        ) {
             val rows = supabase.restGet(
                 table = "chat_prefs",
                 queryParams = listOf("owner_id" to "eq.$userId")
@@ -54,20 +65,27 @@ class ChatRepository(
                     val pref = parseChatPref(rows.getJSONObject(i))
                     if (pref.conversationId.isNotBlank()) put(pref.conversationId, pref)
                 }
-            }
+            }.also { cache?.putChatPrefs(userId, it) }
         }
 
     fun observeMessages(conversationId: String, userId: String): Flow<List<ChatMessage>> =
-        supabase.observeTable(setOf("messages"), fallbackPollMs = 4_000L) {
+        supabase.observeTable(
+            tables = setOf("messages"),
+            fallbackPollMs = 4_000L,
+            initialCached = { cache?.getMessages(userId, conversationId) }
+        ) {
             val rows = supabase.restGet(
                 table = "messages",
                 queryParams = listOf(
                     "conversation_id" to "eq.$conversationId",
                     "member_uids" to "cs.{\"$userId\"}",
-                    "order" to "created_at.asc"
+                    "order" to "created_at.desc",
+                    "limit" to "150"
                 )
             )
             List(rows.length()) { idx -> parseMessage(rows.getJSONObject(idx)) }
+                .asReversed()
+                .also { cache?.putMessages(userId, conversationId, it) }
         }
 
     suspend fun getOrCreateDirectConversation(

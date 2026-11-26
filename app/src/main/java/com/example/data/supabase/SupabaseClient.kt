@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -88,7 +89,9 @@ class SupabaseClient(
     private val refCounter = AtomicInteger(1)
 
     val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
+        .connectionPool(ConnectionPool(10, 5, TimeUnit.MINUTES))
+        .retryOnConnectionFailure(true)
+        .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
         .writeTimeout(25, TimeUnit.SECONDS)
         .pingInterval(25, TimeUnit.SECONDS)
@@ -264,10 +267,20 @@ class SupabaseClient(
     fun <T> observeTable(
         tables: Set<String>,
         fallbackPollMs: Long = 10_000L,
+        initialCached: (() -> T?)? = null,
         fetcher: suspend () -> T
     ): Flow<T> = channelFlow {
         ensureRealtimeConnected()
         val refreshTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+
+        var emittedInitialCache = false
+        if (initialCached != null) {
+            val cached = withContext(Dispatchers.IO) { runCatching { initialCached() }.getOrNull() }
+            if (cached != null) {
+                emittedInitialCache = true
+                send(cached)
+            }
+        }
 
         val collectorJob = launch {
             _tableChanges
@@ -288,12 +301,18 @@ class SupabaseClient(
                 throw ce
             } catch (e: Exception) {
                 Log.w(SB_TAG, "Sync warning for $tables: ${e.message}")
-                throw e
+                if (!emittedInitialCache) throw e
             }
         }
 
         emitLatest()
+        var lastRefreshMs = System.currentTimeMillis()
         refreshTrigger.collect {
+            val elapsed = System.currentTimeMillis() - lastRefreshMs
+            if (elapsed < 100L) {
+                delay(100L - elapsed)
+            }
+            lastRefreshMs = System.currentTimeMillis()
             try {
                 send(fetcher())
             } catch (ce: CancellationException) {

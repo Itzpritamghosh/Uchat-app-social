@@ -56,30 +56,61 @@ class UChatAuthManager(private val appContext: Context) {
     private val keyDisplayName = stringPreferencesKey("display_name")
     private val keySessionToken = stringPreferencesKey("session_token")
 
-    private val _session = MutableStateFlow<UChatSession?>(null)
+    private val fastPrefs by lazy {
+        appContext.getSharedPreferences("uchat_session_fast", Context.MODE_PRIVATE)
+    }
+
+    private val _session = MutableStateFlow<UChatSession?>(readFastSession())
     val session: StateFlow<UChatSession?> = _session.asStateFlow()
 
-    private val _initializing = MutableStateFlow(true)
+    private val _initializing = MutableStateFlow(_session.value == null)
     val initializing: StateFlow<Boolean> = _initializing.asStateFlow()
 
     init {
-        scope.launch {
-            try {
-                val prefs = appContext.uchatSessionStore.data.first()
-                val uid = prefs[keyUserId].orEmpty()
-                val username = prefs[keyUsername].orEmpty()
-                val displayName = prefs[keyDisplayName].orEmpty()
-                val token = prefs[keySessionToken].orEmpty()
-                if (uid.isNotBlank() && token.isNotBlank()) {
-                    _session.value = UChatSession(uid, username, displayName, token)
-                    scope.launch { verifyRestoredSession(token) }
+        val fastRestored = _session.value
+        if (fastRestored != null) {
+            scope.launch { verifyRestoredSession(fastRestored.sessionToken) }
+        } else {
+            scope.launch {
+                try {
+                    val prefs = appContext.uchatSessionStore.data.first()
+                    val uid = prefs[keyUserId].orEmpty()
+                    val username = prefs[keyUsername].orEmpty()
+                    val displayName = prefs[keyDisplayName].orEmpty()
+                    val token = prefs[keySessionToken].orEmpty()
+                    if (uid.isNotBlank() && token.isNotBlank()) {
+                        val migrated = UChatSession(uid, username, displayName, token)
+                        _session.value = migrated
+                        writeFastSession(migrated)
+                        scope.launch { verifyRestoredSession(token) }
+                    }
+                } catch (e: Exception) {
+                    Log.w(AUTH_TAG, "Failed restoring local session: ${e.message}")
+                } finally {
+                    _initializing.value = false
                 }
-            } catch (e: Exception) {
-                Log.w(AUTH_TAG, "Failed restoring local session: ${e.message}")
-            } finally {
-                _initializing.value = false
             }
         }
+    }
+
+    private fun readFastSession(): UChatSession? {
+        return runCatching {
+            val uid = fastPrefs.getString("user_id", "").orEmpty()
+            val token = fastPrefs.getString("session_token", "").orEmpty()
+            if (uid.isBlank() || token.isBlank()) return null
+            val username = fastPrefs.getString("username", "").orEmpty()
+            val displayName = fastPrefs.getString("display_name", username).orEmpty()
+            UChatSession(uid, username, displayName, token)
+        }.getOrNull()
+    }
+
+    private fun writeFastSession(session: UChatSession) {
+        fastPrefs.edit()
+            .putString("user_id", session.userId)
+            .putString("username", session.username)
+            .putString("display_name", session.displayName)
+            .putString("session_token", session.sessionToken)
+            .apply()
     }
 
     private suspend fun verifyRestoredSession(token: String) {
@@ -264,11 +295,13 @@ class UChatAuthManager(private val appContext: Context) {
 
     suspend fun clearLocalSession() {
         _session.value = null
+        fastPrefs.edit().clear().apply()
         appContext.uchatSessionStore.edit { it.clear() }
     }
 
     private suspend fun saveSession(session: UChatSession) {
         _session.value = session
+        writeFastSession(session)
         appContext.uchatSessionStore.edit { prefs ->
             prefs[keyUserId] = session.userId
             prefs[keyUsername] = session.username

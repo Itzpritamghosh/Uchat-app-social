@@ -1,8 +1,11 @@
 package com.example.viewmodel
 
+import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.cache.LocalChatCache
+import com.example.data.model.AppTimestamp
 import com.example.data.model.BlockedUser
 import com.example.data.model.CallRecord
 import com.example.data.model.Channel
@@ -21,6 +24,8 @@ import com.example.data.repository.CallRepository
 import com.example.data.repository.ChannelRepository
 import com.example.data.repository.ChatRepository
 import com.example.data.repository.ProfileRepository
+import com.example.data.update.AppUpdateChecker
+import com.example.data.update.AppUpdateState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -36,7 +41,9 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 private const val VM_TAG = "UChatVM"
 private const val STOP_TIMEOUT_MS = 5000L
@@ -47,7 +54,9 @@ class UChatViewModel(
     private val profileRepo: ProfileRepository,
     private val chatRepo: ChatRepository,
     private val channelRepo: ChannelRepository,
-    private val callRepo: CallRepository
+    private val callRepo: CallRepository,
+    private val localCache: LocalChatCache? = null,
+    private val updateChecker: AppUpdateChecker? = null
 ) : ViewModel() {
 
     private val _selectedTab = MutableStateFlow(MainTab.CHATS)
@@ -71,7 +80,23 @@ class UChatViewModel(
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
-    private fun <T> Flow<T>.toUiState(label: String): StateFlow<UiState<T>> =
+    private val _updateState = MutableStateFlow<AppUpdateState>(AppUpdateState.Idle)
+    val updateState: StateFlow<AppUpdateState> = _updateState.asStateFlow()
+
+    private val _configuredUpdateRepo = MutableStateFlow(updateChecker?.getConfiguredRepo().orEmpty())
+    val configuredUpdateRepo: StateFlow<String> = _configuredUpdateRepo.asStateFlow()
+
+    val currentVersionLabel: String
+        get() = updateChecker?.let { "v${it.currentVersionName} (Build #${it.currentBuildNumber})" } ?: "v1.1"
+
+    private val _pendingMessages = MutableStateFlow<Map<String, List<ChatMessage>>>(emptyMap())
+    private val _optimisticConvPreviews = MutableStateFlow<Map<String, Triple<String, String, AppTimestamp>>>(emptyMap())
+
+    private fun <T> Flow<T>.toUiState(
+        label: String,
+        initial: UiState<T> = UiState.Loading,
+        started: SharingStarted = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS)
+    ): StateFlow<UiState<T>> =
         this.map<T, UiState<T>> { UiState.Success(it) }
             .catch { err ->
                 Log.w(VM_TAG, "Error observing $label", err)
@@ -79,43 +104,52 @@ class UChatViewModel(
             }
             .stateIn(
                 scope = viewModelScope,
-                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
-                initialValue = UiState.Loading
+                started = started,
+                initialValue = initial
             )
 
     private val _profileRetryTick = MutableStateFlow(0)
+
+    private val initialProfile: UiState<UserProfile?> =
+        localCache?.getMyProfile(currentUserId)?.let { UiState.Success(it) } ?: UiState.Loading
 
     val myProfileState: StateFlow<UiState<UserProfile?>> =
         _profileRetryTick.flatMapLatest {
             profileRepo.observeMyProfile(currentUserId)
                 .map<UserProfile?, UiState<UserProfile?>> { UiState.Success(it) }
-                .onStart { emit(UiState.Loading) }
                 .catch { err ->
                     Log.w(VM_TAG, "Error observing profile", err)
                     emit(UiState.Error(err.message ?: "Unable to sync profile"))
                 }
         }.stateIn(
             scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
-            initialValue = UiState.Loading
+            started = SharingStarted.Eagerly,
+            initialValue = initialProfile
         )
 
     fun retryProfileSync() {
         _profileRetryTick.value += 1
     }
 
+    private val initialDiscoverable: UiState<List<UserProfile>> =
+        localCache?.getDiscoverableProfiles(currentUserId)?.let { UiState.Success(it) } ?: UiState.Loading
+
     val discoverableProfilesState: StateFlow<UiState<List<UserProfile>>> =
         _profileRetryTick.flatMapLatest { profileRepo.observeDiscoverableProfiles() }
-            .toUiState("users")
+            .toUiState("users", initial = initialDiscoverable)
 
     val settingsState: StateFlow<UserSettings> =
         _profileRetryTick.flatMapLatest {
             profileRepo.observeSettings(currentUserId)
                 .catch { err ->
                     Log.w(VM_TAG, "Settings fallback", err)
-                    emit(UserSettings())
+                    emit(localCache?.getSettings(currentUserId) ?: UserSettings())
                 }
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), UserSettings())
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            localCache?.getSettings(currentUserId) ?: UserSettings()
+        )
 
     val contactsState: StateFlow<List<ContactEntry>> =
         _profileRetryTick.flatMapLatest {
@@ -151,23 +185,82 @@ class UChatViewModel(
                 .catch { emit(emptyList()) }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
 
+    private val initialConversations: UiState<List<Conversation>> =
+        localCache?.getConversations(currentUserId)?.let { UiState.Success(it) } ?: UiState.Loading
+
     val conversationsState: StateFlow<UiState<List<Conversation>>> =
-        _profileRetryTick.flatMapLatest { chatRepo.observeConversations(currentUserId) }
-            .toUiState("conversations")
+        combine(
+            _profileRetryTick.flatMapLatest { chatRepo.observeConversations(currentUserId) },
+            _optimisticConvPreviews
+        ) { conversations, optimistic ->
+            if (optimistic.isEmpty()) conversations
+            else conversations.map { conv ->
+                val opt = optimistic[conv.id]
+                val currentMs = conv.lastMessageAt?.epochMillis ?: 0L
+                if (opt != null && opt.third.epochMillis >= currentMs) {
+                    conv.copy(
+                        lastMessageText = opt.first,
+                        lastMessageType = opt.second,
+                        lastMessageSenderId = currentUserId,
+                        lastMessageAt = opt.third
+                    )
+                } else {
+                    conv
+                }
+            }.sortedByDescending { it.lastMessageAt ?: it.updatedAt ?: AppTimestamp(0L) }
+        }.toUiState("conversations", initial = initialConversations, started = SharingStarted.Eagerly)
 
     val chatPrefsState: StateFlow<Map<String, ChatPref>> =
         _profileRetryTick.flatMapLatest {
             chatRepo.observeChatPrefs(currentUserId)
-                .catch { emit(emptyMap()) }
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyMap())
+                .catch { emit(localCache?.getChatPrefs(currentUserId) ?: emptyMap()) }
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            localCache?.getChatPrefs(currentUserId) ?: emptyMap()
+        )
 
     val activeMessagesState: StateFlow<UiState<List<ChatMessage>>> =
         combine(_activeConversationId, _profileRetryTick) { convId, _ -> convId }
             .flatMapLatest { convId ->
-                if (convId.isNullOrBlank()) flowOf(emptyList())
-                else chatRepo.observeMessages(convId, currentUserId)
+                if (convId.isNullOrBlank()) {
+                    flowOf(UiState.Success(emptyList()))
+                } else {
+                    val cached = localCache?.getMessages(currentUserId, convId)
+                    combine<List<ChatMessage>, Map<String, List<ChatMessage>>, UiState<List<ChatMessage>>>(
+                        chatRepo.observeMessages(convId, currentUserId),
+                        _pendingMessages
+                    ) { synced, pendingMap ->
+                        val pendingForConv = pendingMap[convId].orEmpty()
+                        if (pendingForConv.isEmpty()) {
+                            UiState.Success(synced)
+                        } else {
+                            val remainingPending = pendingForConv.filter { pending ->
+                                val pendingMs = pending.createdAt?.epochMillis ?: 0L
+                                synced.none { s ->
+                                    s.senderId == currentUserId &&
+                                        s.messageType == pending.messageType &&
+                                        s.text == pending.text &&
+                                        (s.createdAt?.epochMillis ?: 0L) >= (pendingMs - 15_000L)
+                                }
+                            }
+                            UiState.Success(synced + remainingPending)
+                        }
+                    }.onStart {
+                        if (cached != null) emit(UiState.Success(cached))
+                        else emit(UiState.Loading)
+                    }.catch { err ->
+                        Log.w(VM_TAG, "Error observing messages", err)
+                        if (cached != null) emit(UiState.Success(cached))
+                        else emit(UiState.Error(err.message ?: "Unable to sync messages"))
+                    }
+                }
             }
-            .toUiState("messages")
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+                initialValue = UiState.Loading
+            )
 
     val channelsState: StateFlow<UiState<List<Channel>>> =
         _profileRetryTick.flatMapLatest { channelRepo.observePublicChannels() }
@@ -288,6 +381,53 @@ class UChatViewModel(
 
     suspend fun markOfflineBeforeSignOut() {
         profileRepo.setOnlineStatus(false)
+        localCache?.clearUserCache(currentUserId)
+    }
+
+    fun clearUserLocalCache() {
+        localCache?.clearUserCache(currentUserId)
+    }
+
+    fun checkForAppUpdate(silent: Boolean = false) {
+        val checker = updateChecker ?: return
+        if (_updateState.value is AppUpdateState.Checking) return
+        if (silent && checker.getConfiguredRepo().isBlank()) return
+        viewModelScope.launch {
+            if (!silent) {
+                _updateState.value = AppUpdateState.Checking
+            }
+            val result = checker.checkForUpdate()
+            if (silent && result is AppUpdateState.Error) {
+                // Keep UI quiet on background startup check if offline
+                return@launch
+            }
+            _updateState.value = result
+            if (!silent) {
+                when (result) {
+                    is AppUpdateState.UpdateAvailable ->
+                        showStatus("Update available: Build #${result.release.latestBuildNumber}")
+                    is AppUpdateState.UpToDate ->
+                        showStatus("UChat is up to date")
+                    else -> Unit
+                }
+            }
+        }
+    }
+
+    fun saveUpdateRepo(rawInput: String): Result<String> {
+        val checker = updateChecker ?: return Result.failure(IllegalStateException("Update checker unavailable"))
+        val res = checker.saveCustomRepo(rawInput)
+        res.onSuccess { saved ->
+            _configuredUpdateRepo.value = saved
+        }
+        return res
+    }
+
+    fun openAppUpdateUrl(context: Context, url: String) {
+        val checker = updateChecker ?: return
+        checker.openUpdateUrl(context, url).onFailure { err ->
+            showStatus(err.message ?: "Unable to open update link")
+        }
     }
 
     fun addContact(profile: UserProfile) {
@@ -402,12 +542,61 @@ class UChatViewModel(
     ) {
         val me = (myProfileState.value as? UiState.Success)?.data
         val senderName = me?.displayName?.ifBlank { me.username } ?: "UChat User"
+        val cleanText = text.trim().take(4000)
+        if (messageType == "text" && cleanText.isBlank()) return
+
+        val tempId = "local_${UUID.randomUUID()}"
+        val nowTs = AppTimestamp.now()
+        val optimisticMsg = ChatMessage(
+            id = tempId,
+            conversationId = conversation.id,
+            senderId = currentUserId,
+            senderName = senderName,
+            memberUids = conversation.memberUids,
+            messageType = messageType,
+            text = cleanText,
+            mediaBase64 = mediaBase64,
+            mediaName = mediaName,
+            mediaDurationSec = mediaDurationSec?.toLong(),
+            waveform = waveform?.map { it.toLong() },
+            latitude = latitude,
+            longitude = longitude,
+            contactName = contactName,
+            contactUsername = contactUsername,
+            replyToId = replyTo?.id,
+            replyToText = replyTo?.let { it.text.ifBlank { "[${it.messageType}]" }.take(200) },
+            replyToSender = replyTo?.senderName,
+            forwarded = forwarded,
+            deliveredTo = emptyList(),
+            readBy = emptyList(),
+            createdAt = nowTs,
+            updatedAt = nowTs
+        )
+
+        val preview = when (messageType) {
+            "image" -> if (cleanText.isNotBlank()) "📷 $cleanText" else "📷 Photo"
+            "voice" -> "🎤 Voice message (${mediaDurationSec ?: 0}s)"
+            "document" -> "📄 ${mediaName ?: "Document"}"
+            "audio" -> "🎵 ${mediaName ?: "Audio clip"}"
+            "location" -> "📍 Shared location"
+            "contact" -> "👤 Contact: ${contactName ?: "UChat User"}"
+            else -> cleanText
+        }.take(300)
+
+        _pendingMessages.update { current ->
+            val list = current[conversation.id].orEmpty() + optimisticMsg
+            current + (conversation.id to list)
+        }
+        _optimisticConvPreviews.update { current ->
+            current + (conversation.id to Triple(preview, messageType, nowTs))
+        }
+
         viewModelScope.launch {
-            chatRepo.sendMessage(
+            val result = chatRepo.sendMessage(
                 conversation = conversation,
                 senderName = senderName,
                 messageType = messageType,
-                text = text,
+                text = cleanText,
                 mediaBase64 = mediaBase64,
                 mediaName = mediaName,
                 mediaDurationSec = mediaDurationSec,
@@ -418,7 +607,19 @@ class UChatViewModel(
                 contactUsername = contactUsername,
                 replyTo = replyTo,
                 forwarded = forwarded
-            ).onFailure { showStatus(it.message ?: "Failed to send message") }
+            )
+            if (result.isSuccess) {
+                delay(600L)
+            } else {
+                showStatus(result.exceptionOrNull()?.message ?: "Failed to send message")
+            }
+            _pendingMessages.update { current ->
+                val remaining = current[conversation.id].orEmpty().filterNot { it.id == tempId }
+                if (remaining.isEmpty()) current - conversation.id else current + (conversation.id to remaining)
+            }
+            _optimisticConvPreviews.update { current ->
+                if (current[conversation.id]?.third == nowTs) current - conversation.id else current
+            }
         }
     }
 

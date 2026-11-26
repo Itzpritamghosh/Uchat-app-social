@@ -67,6 +67,10 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import com.example.data.cache.LocalChatCache
 import com.example.data.model.MainTab
 import com.example.data.model.UiState
 import com.example.data.repository.CallRepository
@@ -75,6 +79,8 @@ import com.example.data.repository.ChatRepository
 import com.example.data.repository.ProfileRepository
 import com.example.data.supabase.SupabaseClient
 import com.example.data.supabase.UChatAuthManager
+import com.example.data.update.AppUpdateChecker
+import com.example.data.update.AppUpdateState
 import com.example.media.NotificationHelper
 import com.example.ui.components.EmptyStateCard
 import com.example.ui.screens.ActiveCallOverlay
@@ -168,16 +174,23 @@ private fun AuthenticatedUChatApp(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    val localCache = remember(context) { LocalChatCache(context.applicationContext) }
+    val updateChecker = remember(context, supabase) {
+        AppUpdateChecker(context.applicationContext, supabase.httpClient)
+    }
+
     val viewModel: UChatViewModel = viewModel(
         key = currentUserId,
         factory = viewModelFactory {
             initializer {
                 UChatViewModel(
                     currentUserId = currentUserId,
-                    profileRepo = ProfileRepository(supabase),
-                    chatRepo = ChatRepository(supabase),
+                    profileRepo = ProfileRepository(supabase, localCache),
+                    chatRepo = ChatRepository(supabase, localCache),
                     channelRepo = ChannelRepository(supabase),
-                    callRepo = CallRepository(supabase)
+                    callRepo = CallRepository(supabase),
+                    localCache = localCache,
+                    updateChecker = updateChecker
                 )
             }
         }
@@ -193,9 +206,16 @@ private fun AuthenticatedUChatApp(
     val followedChannelIds by viewModel.followedChannelIdsState.collectAsStateWithLifecycle()
     val callsState by viewModel.callsState.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
+    val updateState by viewModel.updateState.collectAsStateWithLifecycle()
+    val hasAppUpdate = updateState is AppUpdateState.UpdateAvailable
 
     val snackbarHostState = remember { SnackbarHostState() }
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Non-blocking background update check so Settings shows an update badge automatically
+    LaunchedEffect(currentUserId) {
+        viewModel.checkForAppUpdate(silent = true)
+    }
 
     fun performSignOut(markOffline: Boolean) {
         scope.launch {
@@ -204,6 +224,8 @@ private fun AuthenticatedUChatApp(
                 beforeSignOut = {
                     if (markOffline) {
                         viewModel.markOfflineBeforeSignOut()
+                    } else {
+                        viewModel.clearUserLocalCache()
                     }
                 }
             )
@@ -360,10 +382,22 @@ private fun AuthenticatedUChatApp(
                                                 selected = selected,
                                                 onClick = { viewModel.selectTab(spec.tab) },
                                                 icon = {
-                                                    Icon(
-                                                        imageVector = if (selected) spec.selectedIcon else spec.unselectedIcon,
-                                                        contentDescription = spec.label
-                                                    )
+                                                    val showDot = spec.tab == MainTab.SETTINGS && hasAppUpdate
+                                                    BadgedBox(
+                                                        badge = {
+                                                            if (showDot) {
+                                                                Badge(
+                                                                    containerColor = MaterialTheme.colorScheme.primary,
+                                                                    modifier = Modifier.size(8.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = if (selected) spec.selectedIcon else spec.unselectedIcon,
+                                                            contentDescription = spec.label
+                                                        )
+                                                    }
                                                 },
                                                 label = { Text(spec.label) },
                                                 colors = NavigationRailItemDefaults.colors(
@@ -434,10 +468,22 @@ private fun AuthenticatedUChatApp(
                                                 selected = selected,
                                                 onClick = { viewModel.selectTab(spec.tab) },
                                                 icon = {
-                                                    Icon(
-                                                        imageVector = if (selected) spec.selectedIcon else spec.unselectedIcon,
-                                                        contentDescription = spec.label
-                                                    )
+                                                    val showDot = spec.tab == MainTab.SETTINGS && hasAppUpdate
+                                                    BadgedBox(
+                                                        badge = {
+                                                            if (showDot) {
+                                                                Badge(
+                                                                    containerColor = MaterialTheme.colorScheme.primary,
+                                                                    modifier = Modifier.size(8.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = if (selected) spec.selectedIcon else spec.unselectedIcon,
+                                                            contentDescription = spec.label
+                                                        )
+                                                    }
                                                 },
                                                 label = { Text(spec.label, style = MaterialTheme.typography.labelSmall) },
                                                 colors = NavigationBarItemDefaults.colors(

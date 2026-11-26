@@ -83,6 +83,7 @@ import com.example.data.model.UiState
 import com.example.data.model.UserProfile
 import com.example.media.CallAudioController
 import com.example.media.MediaUtils
+import com.example.ui.components.AppUpdateSection
 import com.example.ui.components.UserAvatar
 import com.example.ui.theme.LocalUChatColors
 import com.example.ui.theme.UChatAccentPresets
@@ -101,6 +102,8 @@ fun SettingsTabScreen(
     val profileState by viewModel.myProfileState.collectAsStateWithLifecycle()
     val settings by viewModel.settingsState.collectAsStateWithLifecycle()
     val blockedUsers by viewModel.blockedUsersState.collectAsStateWithLifecycle()
+    val updateState by viewModel.updateState.collectAsStateWithLifecycle()
+    val configuredUpdateRepo by viewModel.configuredUpdateRepo.collectAsStateWithLifecycle()
 
     val profile = (profileState as? UiState.Success)?.data
     var cacheBytes by remember { mutableLongStateOf(MediaUtils.calculateCacheBytes(context)) }
@@ -187,6 +190,18 @@ fun SettingsTabScreen(
                     Icon(Icons.Filled.Edit, contentDescription = "Edit profile", tint = MaterialTheme.colorScheme.primary)
                 }
             }
+        }
+
+        // App Updates Section
+        item {
+            AppUpdateSection(
+                currentVersionLabel = viewModel.currentVersionLabel,
+                configuredRepo = configuredUpdateRepo,
+                updateState = updateState,
+                onCheckForUpdate = { viewModel.checkForAppUpdate(silent = false) },
+                onOpenUpdateUrl = { url -> viewModel.openAppUpdateUrl(context, url) },
+                onSaveRepo = { raw -> viewModel.saveUpdateRepo(raw) }
+            )
         }
 
         // Privacy Section

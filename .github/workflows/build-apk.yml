@@ -140,6 +140,8 @@ jobs:
           set -uo pipefail
           BUILD_LOG="${RUNNER_TEMP}/gradle-build.log"
           gradle :app:assembleDebug \
+            -PUCHAT_BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}" \
+            -PUCHAT_GITHUB_REPO="${GITHUB_REPOSITORY:-}" \
             --stacktrace \
             --no-daemon \
             --no-configuration-cache \
