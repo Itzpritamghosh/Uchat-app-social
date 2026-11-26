@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
@@ -39,6 +40,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -66,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import com.example.R
 import com.example.data.firebase.onGoogleSignInClicked
+import com.example.data.firebase.signInWithGoogleBrowser
 import com.example.data.supabase.SupabaseConfig
 import com.example.media.MediaUtils
 import com.example.ui.components.UserAvatar
@@ -273,8 +276,11 @@ fun AuthScreen(
                                 isLoading = false
                                 errorMessage = msg
                             },
-                            onAuthCancelled = {
+                            onAuthCancelled = { hint ->
                                 isLoading = false
+                                if (!hint.isNullOrBlank()) {
+                                    errorMessage = hint
+                                }
                             },
                             scope = scope
                         )
@@ -309,6 +315,46 @@ fun AuthScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
+                }
+
+                Spacer(Modifier.height(10.dp))
+
+                OutlinedButton(
+                    onClick = {
+                        if (isLoading) return@OutlinedButton
+                        errorMessage = null
+                        isLoading = true
+                        signInWithGoogleBrowser(
+                            context = context,
+                            onAuthSuccess = {
+                                isLoading = false
+                                onAuthSuccess()
+                            },
+                            onAuthError = { msg ->
+                                isLoading = false
+                                errorMessage = msg
+                            },
+                            scope = scope
+                        )
+                    },
+                    enabled = !isLoading,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("google_browser_sign_in_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Language,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Sign in via Browser (Google)",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
 
                 Spacer(Modifier.height(12.dp))

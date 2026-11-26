@@ -1,6 +1,8 @@
 package com.example.data.firebase
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.util.Log
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
@@ -18,6 +20,7 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.auth.OAuthProvider
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
@@ -30,6 +33,12 @@ import kotlinx.coroutines.withContext
 
 private const val AUTH_TAG = "Auth"
 
+tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     val listener = FirebaseAuth.AuthStateListener { auth ->
         trySend(auth.currentUser)
@@ -40,6 +49,7 @@ fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
 
 /**
  * Silent automatic sign-in on startup for returning users who already authorized UChat.
+ * Also completes any pending Firebase browser OAuth result if the Activity was recreated.
  */
 fun attemptAutoSignIn(
     context: Context,
@@ -54,7 +64,17 @@ fun attemptAutoSignIn(
     }
     scope.launch {
         try {
-            val webClientId = context.getString(R.string.default_web_client_id)
+            val pending = Firebase.auth.pendingAuthResult
+            if (pending != null) {
+                pending.await()
+                if (Firebase.auth.currentUser != null) {
+                    onAuthSuccess()
+                    return@launch
+                }
+            }
+
+            val activityContext = context.findActivity() ?: context
+            val webClientId = activityContext.getString(R.string.default_web_client_id)
             val googleIdOption = GetGoogleIdOption.Builder()
                 .setFilterByAuthorizedAccounts(true)
                 .setServerClientId(webClientId)
@@ -67,7 +87,7 @@ fun attemptAutoSignIn(
 
             val result = credentialManager.getCredential(
                 request = request,
-                context = context
+                context = activityContext
             )
 
             val credential = result.credential
@@ -92,8 +112,69 @@ fun attemptAutoSignIn(
     }
 }
 
+private fun isPlayServicesConfigOrAuthFailure(message: String): Boolean {
+    val lower = message.lowercase()
+    return lower.contains("28444") ||
+        lower.contains("developer console") ||
+        lower.contains("reauth") ||
+        lower.contains("16:") ||
+        lower.contains("[16]") ||
+        lower.contains("caller is not authorized") ||
+        lower.contains("cannot find a matching credential") ||
+        lower.contains("configuration") ||
+        lower.contains("sha") ||
+        lower.contains("signature")
+}
+
 /**
- * Interactive Google Sign-In flow triggered by the Sign In with Google button.
+ * Firebase Web OAuth fallback using official Firebase OAuthProvider("google.com").
+ * Works reliably on physical devices even if Google Play Services One-Tap fails due to
+ * OEM Credential Manager quirks or a mismatched debug keystore SHA-1.
+ */
+fun signInWithGoogleBrowser(
+    context: Context,
+    onAuthSuccess: () -> Unit,
+    onAuthError: (String) -> Unit,
+    scope: CoroutineScope
+) {
+    val activity = context.findActivity()
+    if (activity == null) {
+        onAuthError("Unable to launch Google Sign-In browser from this screen.")
+        return
+    }
+    scope.launch {
+        try {
+            val pending = Firebase.auth.pendingAuthResult
+            if (pending != null) {
+                pending.await()
+            } else {
+                val provider = OAuthProvider.newBuilder("google.com")
+                    .addCustomParameter("prompt", "select_account")
+                    .build()
+                Firebase.auth.startActivityForSignInWithProvider(activity, provider).await()
+            }
+            if (Firebase.auth.currentUser != null) {
+                onAuthSuccess()
+            } else {
+                onAuthError("Google Sign-In did not complete. Please try again.")
+            }
+        } catch (e: Exception) {
+            Log.e(AUTH_TAG, "Browser Google Sign-In failed: ${e.message}", e)
+            val msg = e.message.orEmpty()
+            if (msg.contains("canceled", ignoreCase = true) || msg.contains("cancelled", ignoreCase = true)) {
+                onAuthError("Sign-in was cancelled. Tap below to try again.")
+            } else {
+                onAuthError(msg.ifBlank { "Google Sign-In failed. Check your internet connection and try again." })
+            }
+        }
+    }
+}
+
+/**
+ * Interactive Google Sign-In flow triggered by the Continue with Google button.
+ * Uses Jetpack Credential Manager (GetSignInWithGoogleOption) first, and seamlessly falls back
+ * to Firebase OAuthProvider("google.com") if Play Services rejects the APK SHA-1 or fails to
+ * return a credential on a physical device.
  */
 fun onGoogleSignInClicked(
     context: Context,
@@ -101,11 +182,14 @@ fun onGoogleSignInClicked(
     onAuthSuccess: () -> Unit,
     onAuthError: (String) -> Unit,
     scope: CoroutineScope,
-    onAuthCancelled: () -> Unit = {}
+    onAuthCancelled: (String?) -> Unit = {}
 ) {
+    val activity = context.findActivity()
+    val activityContext: Context = activity ?: context
+
     scope.launch {
         try {
-            val webClientId = context.getString(R.string.default_web_client_id)
+            val webClientId = activityContext.getString(R.string.default_web_client_id)
             val signInWithGoogleOption = GetSignInWithGoogleOption.Builder(webClientId)
                 .build()
 
@@ -115,7 +199,7 @@ fun onGoogleSignInClicked(
 
             val result = credentialManager.getCredential(
                 request = request,
-                context = context
+                context = activityContext
             )
 
             val credential = result.credential
@@ -127,17 +211,39 @@ fun onGoogleSignInClicked(
                 Firebase.auth.signInWithCredential(firebaseCredential).await()
                 onAuthSuccess()
             } else {
-                onAuthError("Unexpected credential type received. Please try again.")
+                onAuthError("Unexpected credential type received. Please try Sign in via Browser below.")
             }
         } catch (e: GetCredentialCancellationException) {
-            Log.w(AUTH_TAG, "User cancelled sign-in", e)
-            onAuthCancelled()
+            val detail = (e.errorMessage?.toString() ?: e.message).orEmpty()
+            Log.w(AUTH_TAG, "Credential Manager cancelled: $detail", e)
+            if (isPlayServicesConfigOrAuthFailure(detail) && activity != null) {
+                signInWithGoogleBrowser(
+                    context = activity,
+                    onAuthSuccess = onAuthSuccess,
+                    onAuthError = onAuthError,
+                    scope = scope
+                )
+            } else {
+                onAuthCancelled(
+                    "Google quick sign-in closed before finishing. If you selected your Gmail and nothing happened, tap 'Sign in via Browser' below."
+                )
+            }
         } catch (e: GetCredentialException) {
-            Log.e(AUTH_TAG, "Google Sign-In failed: ${e.message}", e)
-            onAuthError(e.errorMessage?.toString() ?: e.message ?: "Google Sign-In failed. Please try again.")
+            val detail = (e.errorMessage?.toString() ?: e.message).orEmpty()
+            Log.e(AUTH_TAG, "Google Sign-In failed via Credential Manager: $detail", e)
+            if (activity != null) {
+                signInWithGoogleBrowser(
+                    context = activity,
+                    onAuthSuccess = onAuthSuccess,
+                    onAuthError = onAuthError,
+                    scope = scope
+                )
+            } else {
+                onAuthError(detail.ifBlank { "Google Sign-In failed. Please try again." })
+            }
         } catch (e: GoogleIdTokenParsingException) {
             Log.e(AUTH_TAG, "Failed to parse Google ID token", e)
-            onAuthError("Unable to verify Google account token. Please try again.")
+            onAuthError("Unable to verify Google account token. Try 'Sign in via Browser' below.")
         } catch (e: Exception) {
             Log.e(AUTH_TAG, "Authentication failed: ${e.message}", e)
             onAuthError(e.message ?: "Sign-In failed. Check your internet connection and try again.")
