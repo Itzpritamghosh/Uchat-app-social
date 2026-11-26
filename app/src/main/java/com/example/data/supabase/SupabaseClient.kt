@@ -2,6 +2,10 @@ package com.example.data.supabase
 
 import android.util.Base64
 import android.util.Log
+import com.example.BuildConfig
+import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.auth
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,7 +27,12 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.URI
 import java.net.URLEncoder
+import java.net.UnknownHostException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -31,9 +40,52 @@ import java.util.concurrent.atomic.AtomicInteger
 private const val SB_TAG = "SupabaseClient"
 private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
 private const val MEDIA_BUCKET = "uchat-media"
+private const val REALTIME_TOPIC = "realtime:uchat-sync"
 
+object SupabaseConfig {
+    private fun sanitize(raw: String): String =
+        raw.trim().trim('"', '\'').trim()
+
+    val baseUrl: String
+        get() {
+            val cleaned = sanitize(BuildConfig.SUPABASE_URL).trimEnd('/')
+            if (cleaned.isBlank()) return ""
+            return when {
+                cleaned.startsWith("https://", ignoreCase = true) -> cleaned
+                cleaned.startsWith("http://", ignoreCase = true) -> cleaned
+                cleaned.contains(".supabase.") -> "https://$cleaned"
+                else -> cleaned
+            }
+        }
+
+    val anonKey: String
+        get() = sanitize(BuildConfig.SUPABASE_ANON_KEY)
+
+    val hostDisplay: String
+        get() = runCatching { URI(baseUrl).host.orEmpty() }.getOrDefault("")
+
+    val isConfigured: Boolean
+        get() = (baseUrl.startsWith("https://", ignoreCase = true) || baseUrl.startsWith("http://", ignoreCase = true)) &&
+            !baseUrl.contains("YOUR_PROJECT_REF", ignoreCase = true) &&
+            anonKey.isNotBlank() &&
+            !anonKey.contains("YOUR_SUPABASE_ANON_KEY", ignoreCase = true)
+
+    fun requireConfigured() {
+        if (!isConfigured) {
+            throw IllegalStateException(
+                "Supabase is not configured in this build. Add SUPABASE_URL and SUPABASE_ANON_KEY in AI Studio Secrets (or GitHub Actions Secrets) and rebuild."
+            )
+        }
+    }
+}
+
+/**
+ * Supabase client for real-time messaging, Postgres data sync, WebRTC signaling, and media storage.
+ * User authentication is managed strictly by Firebase Auth; every Supabase request requires an
+ * active Firebase Auth session and passes the verified Firebase UID for Postgres RLS enforcement.
+ */
 class SupabaseClient(
-    val auth: SupabaseAuthManager
+    private val auth: FirebaseAuth = Firebase.auth
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val refCounter = AtomicInteger(1)
@@ -53,12 +105,40 @@ class SupabaseClient(
     @Volatile
     private var realtimeStarted = false
 
+    fun currentUserId(): String? = auth.currentUser?.uid?.takeIf { it.isNotBlank() }
+
     fun requireUserId(): String =
-        auth.currentUserId()
-            ?: throw IllegalStateException("Please sign in to your UChat account first.")
+        currentUserId()
+            ?: throw IllegalStateException("Please sign in with Google first.")
 
     fun notifyLocalChange(vararg tables: String) {
-        tables.forEach { _tableChanges.tryEmit(it) }
+        tables.forEach { table ->
+            _tableChanges.tryEmit(table)
+            broadcastTableChange(table)
+        }
+    }
+
+    private fun broadcastTableChange(table: String) {
+        val ws = realtimeSocket ?: return
+        runCatching {
+            val frame = JSONObject()
+                .put("topic", REALTIME_TOPIC)
+                .put("event", "broadcast")
+                .put(
+                    "payload",
+                    JSONObject()
+                        .put("type", "broadcast")
+                        .put("event", "table_changed")
+                        .put("payload", JSONObject().put("table", table))
+                )
+                .put("ref", refCounter.getAndIncrement().toString())
+            ws.send(frame.toString())
+        }
+    }
+
+    fun disconnectRealtime() {
+        runCatching { realtimeSocket?.close(1000, "Session changed") }
+        realtimeSocket = null
     }
 
     fun ensureRealtimeConnected() {
@@ -70,19 +150,18 @@ class SupabaseClient(
         scope.launch {
             var backoffMs = 1500L
             while (isActive) {
-                val token = auth.getValidAccessToken()
-                if (token.isNullOrBlank() || !SupabaseConfig.isConfigured) {
-                    delay(3000L)
+                if (currentUserId() == null || !SupabaseConfig.isConfigured) {
+                    delay(2500L)
                     continue
                 }
-                val connected = connectRealtimeOnce(token)
+                val connected = connectRealtimeOnce()
                 backoffMs = if (connected) 1500L else (backoffMs * 2L).coerceAtMost(20_000L)
                 delay(backoffMs)
             }
         }
     }
 
-    private suspend fun connectRealtimeOnce(accessToken: String): Boolean {
+    private suspend fun connectRealtimeOnce(): Boolean {
         val base = SupabaseConfig.baseUrl
         val wsBase = when {
             base.startsWith("https://") -> "wss://" + base.removePrefix("https://")
@@ -100,7 +179,7 @@ class SupabaseClient(
                 realtimeSocket = webSocket
                 val joinPayload = JSONObject().apply {
                     put("config", JSONObject().apply {
-                        put("broadcast", JSONObject().put("self", false))
+                        put("broadcast", JSONObject().put("self", false).put("ack", false))
                         put("presence", JSONObject().put("key", ""))
                         put(
                             "postgres_changes",
@@ -111,10 +190,10 @@ class SupabaseClient(
                             )
                         )
                     })
-                    put("access_token", accessToken)
+                    put("access_token", SupabaseConfig.anonKey)
                 }
                 val joinMsg = JSONObject()
-                    .put("topic", "realtime:public")
+                    .put("topic", REALTIME_TOPIC)
                     .put("event", "phx_join")
                     .put("payload", joinPayload)
                     .put("ref", refCounter.getAndIncrement().toString())
@@ -125,17 +204,22 @@ class SupabaseClient(
                 try {
                     val msg = JSONObject(text)
                     val event = msg.optString("event", "")
-                    if (event == "postgres_changes") {
-                        val data = msg.optJSONObject("payload")?.optJSONObject("data")
-                        val table = data?.optString("table", "").orEmpty()
-                        if (table.isNotBlank()) {
-                            _tableChanges.tryEmit(table)
-                        } else {
-                            _tableChanges.tryEmit("*")
+                    when (event) {
+                        "broadcast" -> {
+                            val outer = msg.optJSONObject("payload")
+                            val inner = outer?.optJSONObject("payload")
+                            val table = inner?.optString("table", "").orEmpty()
+                            _tableChanges.tryEmit(table.ifBlank { "*" })
                         }
-                    } else if (event == "INSERT" || event == "UPDATE" || event == "DELETE") {
-                        val table = msg.optJSONObject("payload")?.optString("table", "").orEmpty()
-                        _tableChanges.tryEmit(table.ifBlank { "*" })
+                        "postgres_changes" -> {
+                            val data = msg.optJSONObject("payload")?.optJSONObject("data")
+                            val table = data?.optString("table", "").orEmpty()
+                            _tableChanges.tryEmit(table.ifBlank { "*" })
+                        }
+                        "INSERT", "UPDATE", "DELETE" -> {
+                            val table = msg.optJSONObject("payload")?.optString("table", "").orEmpty()
+                            _tableChanges.tryEmit(table.ifBlank { "*" })
+                        }
                     }
                 } catch (_: Exception) {
                 }
@@ -222,28 +306,47 @@ class SupabaseClient(
         pollJob.cancel()
     }
 
+    private suspend fun executeAuthedRequest(
+        requestBuilder: (uid: String) -> Request
+    ): Pair<Int, String> = withContext(Dispatchers.IO) {
+        SupabaseConfig.requireConfigured()
+        val uid = requireUserId()
+        try {
+            httpClient.newCall(requestBuilder(uid)).execute().use { resp ->
+                resp.code to resp.body?.string().orEmpty()
+            }
+        } catch (e: UnknownHostException) {
+            throw IllegalStateException(
+                "Cannot reach Supabase (${SupabaseConfig.hostDisplay.ifBlank { "check SUPABASE_URL" }}). Check your internet connection."
+            )
+        } catch (e: SocketTimeoutException) {
+            throw IllegalStateException("Connection to Supabase timed out. Tap Retry.")
+        } catch (e: ConnectException) {
+            throw IllegalStateException("Unable to connect to Supabase right now. Check your network.")
+        } catch (e: IOException) {
+            throw IllegalStateException("Network error talking to Supabase: ${e.message ?: "please retry"}.")
+        }
+    }
+
     suspend fun restGet(
         table: String,
         queryParams: List<Pair<String, String>> = emptyList()
-    ): JSONArray = withContext(Dispatchers.IO) {
-        SupabaseConfig.requireConfigured()
-        val token = auth.getValidAccessToken()
-            ?: throw IllegalStateException("Session expired. Please sign in again.")
+    ): JSONArray {
         val url = buildRestUrl(table, queryParams)
-        val req = Request.Builder()
-            .url(url)
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Authorization", "Bearer $token")
-            .addHeader("Accept", "application/json")
-            .get()
-            .build()
-        httpClient.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                throw IllegalStateException(extractRestError(text, resp.code))
-            }
-            if (text.isBlank()) JSONArray() else JSONArray(text)
+        val (code, text) = executeAuthedRequest { uid ->
+            Request.Builder()
+                .url(url)
+                .addHeader("apikey", SupabaseConfig.anonKey)
+                .addHeader("Authorization", "Bearer ${SupabaseConfig.anonKey}")
+                .addHeader("x-firebase-uid", uid)
+                .addHeader("Accept", "application/json")
+                .get()
+                .build()
         }
+        if (code !in 200..299) {
+            throw IllegalStateException(extractRestError(text, code))
+        }
+        return if (text.isBlank()) JSONArray() else JSONArray(text)
     }
 
     suspend fun restPost(
@@ -251,79 +354,72 @@ class SupabaseClient(
         body: JSONObject,
         upsert: Boolean = false,
         onConflict: String? = null
-    ): JSONArray = withContext(Dispatchers.IO) {
-        SupabaseConfig.requireConfigured()
-        val token = auth.getValidAccessToken()
-            ?: throw IllegalStateException("Session expired. Please sign in again.")
+    ): JSONArray {
         val params = if (!onConflict.isNullOrBlank()) listOf("on_conflict" to onConflict) else emptyList()
         val url = buildRestUrl(table, params)
         val prefer = if (upsert) "resolution=merge-duplicates,return=representation" else "return=representation"
-        val req = Request.Builder()
-            .url(url)
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Authorization", "Bearer $token")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Prefer", prefer)
-            .post(body.toString().toRequestBody(JSON_TYPE))
-            .build()
-        httpClient.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                throw IllegalStateException(extractRestError(text, resp.code))
-            }
-            notifyLocalChange(table)
-            if (text.isBlank()) JSONArray() else JSONArray(text)
+        val jsonBody = body.toString()
+        val (code, text) = executeAuthedRequest { uid ->
+            Request.Builder()
+                .url(url)
+                .addHeader("apikey", SupabaseConfig.anonKey)
+                .addHeader("Authorization", "Bearer ${SupabaseConfig.anonKey}")
+                .addHeader("x-firebase-uid", uid)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Prefer", prefer)
+                .post(jsonBody.toRequestBody(JSON_TYPE))
+                .build()
         }
+        if (code !in 200..299) {
+            throw IllegalStateException(extractRestError(text, code))
+        }
+        notifyLocalChange(table)
+        return if (text.isBlank()) JSONArray() else JSONArray(text)
     }
 
     suspend fun restPatch(
         table: String,
         queryParams: List<Pair<String, String>>,
         body: JSONObject
-    ): JSONArray = withContext(Dispatchers.IO) {
-        SupabaseConfig.requireConfigured()
-        val token = auth.getValidAccessToken()
-            ?: throw IllegalStateException("Session expired. Please sign in again.")
+    ): JSONArray {
         val url = buildRestUrl(table, queryParams)
-        val req = Request.Builder()
-            .url(url)
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Authorization", "Bearer $token")
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Prefer", "return=representation")
-            .patch(body.toString().toRequestBody(JSON_TYPE))
-            .build()
-        httpClient.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                throw IllegalStateException(extractRestError(text, resp.code))
-            }
-            notifyLocalChange(table)
-            if (text.isBlank()) JSONArray() else JSONArray(text)
+        val jsonBody = body.toString()
+        val (code, text) = executeAuthedRequest { uid ->
+            Request.Builder()
+                .url(url)
+                .addHeader("apikey", SupabaseConfig.anonKey)
+                .addHeader("Authorization", "Bearer ${SupabaseConfig.anonKey}")
+                .addHeader("x-firebase-uid", uid)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Prefer", "return=representation")
+                .patch(jsonBody.toRequestBody(JSON_TYPE))
+                .build()
         }
+        if (code !in 200..299) {
+            throw IllegalStateException(extractRestError(text, code))
+        }
+        notifyLocalChange(table)
+        return if (text.isBlank()) JSONArray() else JSONArray(text)
     }
 
     suspend fun restDelete(
         table: String,
         queryParams: List<Pair<String, String>>
-    ) = withContext(Dispatchers.IO) {
-        SupabaseConfig.requireConfigured()
-        val token = auth.getValidAccessToken()
-            ?: throw IllegalStateException("Session expired. Please sign in again.")
+    ) {
         val url = buildRestUrl(table, queryParams)
-        val req = Request.Builder()
-            .url(url)
-            .addHeader("apikey", SupabaseConfig.anonKey)
-            .addHeader("Authorization", "Bearer $token")
-            .delete()
-            .build()
-        httpClient.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) {
-                throw IllegalStateException(extractRestError(text, resp.code))
-            }
-            notifyLocalChange(table)
+        val (code, text) = executeAuthedRequest { uid ->
+            Request.Builder()
+                .url(url)
+                .addHeader("apikey", SupabaseConfig.anonKey)
+                .addHeader("Authorization", "Bearer ${SupabaseConfig.anonKey}")
+                .addHeader("x-firebase-uid", uid)
+                .delete()
+                .build()
         }
+        if (code !in 200..299) {
+            throw IllegalStateException(extractRestError(text, code))
+        }
+        notifyLocalChange(table)
     }
 
     suspend fun uploadBase64ToStorageOrFallback(
@@ -340,16 +436,17 @@ class SupabaseClient(
         return withContext(Dispatchers.IO) {
             try {
                 SupabaseConfig.requireConfigured()
-                val token = auth.getValidAccessToken() ?: return@withContext mediaValue
+                if (currentUserId() == null) return@withContext mediaValue
                 val bytes = Base64.decode(mediaValue, Base64.DEFAULT)
-                val safeFolder = folder.replace(Regex("[^a-zA-Z0-9_-]"), "")
+                val safeOwner = ownerUid.replace(Regex("[^a-zA-Z0-9_-]"), "").ifBlank { "user" }
+                val safeFolder = folder.replace(Regex("[^a-zA-Z0-9_-]"), "").ifBlank { "files" }
                 val safeExt = extension.replace(Regex("[^a-zA-Z0-9]"), "").ifBlank { "bin" }
-                val objectPath = "$ownerUid/$safeFolder/${UUID.randomUUID()}.$safeExt"
+                val objectPath = "$safeOwner/$safeFolder/${UUID.randomUUID()}.$safeExt"
                 val uploadUrl = "${SupabaseConfig.baseUrl}/storage/v1/object/$MEDIA_BUCKET/$objectPath"
                 val req = Request.Builder()
                     .url(uploadUrl)
                     .addHeader("apikey", SupabaseConfig.anonKey)
-                    .addHeader("Authorization", "Bearer $token")
+                    .addHeader("Authorization", "Bearer ${SupabaseConfig.anonKey}")
                     .addHeader("x-upsert", "true")
                     .addHeader("Content-Type", contentType)
                     .post(bytes.toRequestBody(contentType.toMediaType()))
@@ -379,14 +476,23 @@ class SupabaseClient(
     }
 
     private fun extractRestError(body: String, code: Int): String {
-        return try {
-            val obj = JSONObject(body)
-            obj.optString("message")
-                .ifBlank { obj.optString("details") }
-                .ifBlank { obj.optString("hint") }
-                .ifBlank { "Supabase request failed (HTTP $code)" }
-        } catch (_: Exception) {
-            "Supabase request failed (HTTP $code)"
+        val parsed = runCatching { JSONObject(body) }.getOrNull()
+        val msg = parsed?.optString("message")
+            ?.ifBlank { parsed.optString("details") }
+            ?.ifBlank { parsed.optString("hint") }
+            .orEmpty()
+        val lower = msg.lowercase()
+        return when {
+            lower.contains("invalid input syntax for type uuid") ||
+                lower.contains("relation") && lower.contains("does not exist") ||
+                lower.contains("could not find the table") ->
+                "Supabase tables need setup/update. Run supabase_schema.sql in your Supabase SQL Editor and tap Retry."
+            code == 401 ->
+                "Supabase rejected the API key (HTTP 401). Check SUPABASE_ANON_KEY in Secrets."
+            lower.contains("row-level security") ->
+                "Supabase security policy blocked this request. Run the latest supabase_schema.sql in Supabase SQL Editor."
+            msg.isNotBlank() -> msg
+            else -> "Supabase request failed (HTTP $code)"
         }
     }
 

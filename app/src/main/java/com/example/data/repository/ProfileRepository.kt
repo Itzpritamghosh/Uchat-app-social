@@ -255,7 +255,7 @@ class ProfileRepository(
     }
 
     suspend fun setOnlineStatus(online: Boolean): Result<Unit> {
-        val uid = supabase.auth.currentUserId() ?: return Result.success(Unit)
+        val uid = supabase.currentUserId() ?: return Result.success(Unit)
         return try {
             val now = nowIso()
             val updates = JSONObject().apply {

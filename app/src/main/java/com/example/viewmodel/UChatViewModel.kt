@@ -82,8 +82,25 @@ class UChatViewModel(
                 initialValue = UiState.Loading
             )
 
+    private val _profileRetryTick = MutableStateFlow(0)
+
     val myProfileState: StateFlow<UiState<UserProfile?>> =
-        profileRepo.observeMyProfile(currentUserId).toUiState("profile")
+        _profileRetryTick.flatMapLatest {
+            profileRepo.observeMyProfile(currentUserId)
+                .map<UserProfile?, UiState<UserProfile?>> { UiState.Success(it) }
+                .catch { err ->
+                    Log.w(VM_TAG, "Error observing profile", err)
+                    emit(UiState.Error(err.message ?: "Unable to sync profile"))
+                }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = UiState.Loading
+        )
+
+    fun retryProfileSync() {
+        _profileRetryTick.value += 1
+    }
 
     val discoverableProfilesState: StateFlow<UiState<List<UserProfile>>> =
         profileRepo.observeDiscoverableProfiles().toUiState("users")

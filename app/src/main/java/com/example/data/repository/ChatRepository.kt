@@ -310,7 +310,7 @@ class ChatRepository(
     }
 
     suspend fun setTyping(conversationId: String, typing: Boolean): Result<Unit> {
-        val uid = supabase.auth.currentUserId() ?: return Result.success(Unit)
+        val uid = supabase.currentUserId() ?: return Result.success(Unit)
         return try {
             val now = nowIso()
             val body = JSONObject().apply {
@@ -425,7 +425,7 @@ class ChatRepository(
         messages: List<ChatMessage>,
         sendReadReceipts: Boolean
     ): Result<Unit> {
-        val uid = supabase.auth.currentUserId() ?: return Result.success(Unit)
+        val uid = supabase.currentUserId() ?: return Result.success(Unit)
         val targets = messages.filter { msg ->
             msg.senderId != uid && (uid !in msg.deliveredTo || (sendReadReceipts && uid !in msg.readBy))
         }.take(20)

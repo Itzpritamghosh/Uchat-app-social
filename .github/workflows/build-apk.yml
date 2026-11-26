@@ -122,14 +122,32 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           set -euo pipefail
-          if [ -n "${SUPABASE_URL:-}" ] && [ -n "${SUPABASE_ANON_KEY:-}" ]; then
+          CLEAN_URL="$(printf '%s' "${SUPABASE_URL:-}" | tr -d '\r\n' | sed -E 's/^[[:space:]"'\'']+|[[:space:]"'\'']+$//g')"
+          CLEAN_KEY="$(printf '%s' "${SUPABASE_ANON_KEY:-}" | tr -d '\r\n' | sed -E 's/^[[:space:]"'\'']+|[[:space:]"'\'']+$//g')"
+          if [ -n "$CLEAN_URL" ] && [ -n "$CLEAN_KEY" ]; then
             {
-              printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL"
-              printf 'SUPABASE_ANON_KEY=%s\n' "$SUPABASE_ANON_KEY"
+              printf 'SUPABASE_URL=%s\n' "$CLEAN_URL"
+              printf 'SUPABASE_ANON_KEY=%s\n' "$CLEAN_KEY"
             } > .env
             echo "Configured Supabase environment from repository secrets."
           else
-            echo "Using .env.example defaults for build."
+            echo "Using .env.example defaults for build (set SUPABASE_URL and SUPABASE_ANON_KEY repository secrets to enable Supabase in the APK)."
+          fi
+
+      - name: Configure Firebase google-services.json (optional secret)
+        shell: bash
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          set -euo pipefail
+          if [ -n "${GOOGLE_SERVICES_JSON:-}" ]; then
+            printf '%s\n' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+            echo "Wrote app/google-services.json from repository secret."
+          elif [ -f "app/google-services.json" ]; then
+            echo "Using committed app/google-services.json."
+          else
+            echo "::error::app/google-services.json is missing. Commit app/google-services.json or set the GOOGLE_SERVICES_JSON repository secret."
+            exit 1
           fi
 
       - name: Build debug APK

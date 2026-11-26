@@ -25,28 +25,25 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -64,13 +61,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.credentials.CredentialManager
 import com.example.R
-import com.example.data.supabase.SupabaseAuthManager
+import com.example.data.firebase.onGoogleSignInClicked
 import com.example.data.supabase.SupabaseConfig
 import com.example.media.MediaUtils
 import com.example.ui.components.UserAvatar
@@ -80,24 +75,13 @@ import kotlinx.coroutines.launch
 
 @Composable
 fun AuthScreen(
-    authManager: SupabaseAuthManager,
+    credentialManager: CredentialManager,
     onAuthSuccess: () -> Unit
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var isSignUpMode by remember { mutableStateOf(false) }
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var showPassword by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    var infoMessage by remember { mutableStateOf<String?>(null) }
-
-    val fieldColors = OutlinedTextFieldDefaults.colors(
-        focusedBorderColor = MaterialTheme.colorScheme.primary,
-        unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant
-    )
 
     Box(
         modifier = Modifier
@@ -118,11 +102,11 @@ fun AuthScreen(
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(10.dp))
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(185.dp)
+                        .height(210.dp)
                         .clip(RoundedCornerShape(28.dp))
                         .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(28.dp))
                 ) {
@@ -165,7 +149,11 @@ fun AuthScreen(
                             )
                             Spacer(Modifier.width(6.dp))
                             Text(
-                                text = "Supabase Realtime + WebRTC",
+                                text = if (SupabaseConfig.isConfigured && SupabaseConfig.hostDisplay.isNotBlank()) {
+                                    "Firebase Auth • Supabase Ready"
+                                } else {
+                                    "Firebase Auth • Supabase Realtime"
+                                },
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.primary
                             )
@@ -173,7 +161,7 @@ fun AuthScreen(
                     }
                 }
 
-                Spacer(Modifier.height(22.dp))
+                Spacer(Modifier.height(24.dp))
                 Text(
                     text = "UChat",
                     style = MaterialTheme.typography.displaySmall,
@@ -187,7 +175,7 @@ fun AuthScreen(
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(Modifier.height(18.dp))
+                Spacer(Modifier.height(20.dp))
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     shape = RoundedCornerShape(18.dp),
@@ -196,9 +184,10 @@ fun AuthScreen(
                         .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(18.dp))
                 ) {
                     Column(
-                        modifier = Modifier.padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(9.dp)
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
+                        FeatureRow("One-tap Firebase Authentication with Google Sign-In")
                         FeatureRow("Live 1:1, Saved Messages & group chat over Supabase Realtime")
                         FeatureRow("Photos, voice notes & files stored in Supabase Storage")
                         FeatureRow("Direct P2P WebRTC audio & video calls with live signaling")
@@ -209,52 +198,9 @@ fun AuthScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 22.dp, bottom = 8.dp),
+                    .padding(top = 24.dp, bottom = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Mode selector (Sign In / Create Account)
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(14.dp))
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        AuthModePill(
-                            label = "Sign In",
-                            selected = !isSignUpMode,
-                            onClick = {
-                                isSignUpMode = false
-                                errorMessage = null
-                                infoMessage = null
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("auth_mode_sign_in")
-                        )
-                        AuthModePill(
-                            label = "Create Account",
-                            selected = isSignUpMode,
-                            onClick = {
-                                isSignUpMode = true
-                                errorMessage = null
-                                infoMessage = null
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("auth_mode_sign_up")
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(14.dp))
-
                 if (!SupabaseConfig.isConfigured) {
                     Surface(
                         color = MaterialTheme.colorScheme.error.copy(alpha = 0.16f),
@@ -275,7 +221,7 @@ fun AuthScreen(
                             )
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                text = "Supabase credentials missing. Set SUPABASE_URL and SUPABASE_ANON_KEY in Secrets to enable real-time sign-in.",
+                                text = "Supabase secrets are not injected into this build yet. Add SUPABASE_URL and SUPABASE_ANON_KEY in AI Studio Secrets (or GitHub Actions Secrets) and rebuild.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error
                             )
@@ -283,51 +229,13 @@ fun AuthScreen(
                     }
                 }
 
-                OutlinedTextField(
-                    value = email,
-                    onValueChange = { email = it.trim().take(120) },
-                    label = { Text("Email address") },
-                    leadingIcon = { Icon(Icons.Filled.Email, contentDescription = null) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                    colors = fieldColors,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("auth_email_input")
-                )
-
-                Spacer(Modifier.height(10.dp))
-
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it.take(128) },
-                    label = { Text("Password") },
-                    leadingIcon = { Icon(Icons.Filled.Lock, contentDescription = null) },
-                    trailingIcon = {
-                        IconButton(onClick = { showPassword = !showPassword }) {
-                            Icon(
-                                imageVector = if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                contentDescription = if (showPassword) "Hide password" else "Show password"
-                            )
-                        }
-                    },
-                    singleLine = true,
-                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    colors = fieldColors,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("auth_password_input")
-                )
-
                 if (errorMessage != null) {
-                    Spacer(Modifier.height(12.dp))
                     Surface(
                         color = MaterialTheme.colorScheme.error.copy(alpha = 0.16f),
                         shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -349,56 +257,29 @@ fun AuthScreen(
                     }
                 }
 
-                if (infoMessage != null) {
-                    Spacer(Modifier.height(12.dp))
-                    Surface(
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = infoMessage ?: "",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(12.dp)
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(16.dp))
-
                 Button(
                     onClick = {
+                        if (isLoading) return@Button
                         errorMessage = null
-                        infoMessage = null
                         isLoading = true
-                        scope.launch {
-                            if (isSignUpMode) {
-                                val res = authManager.signUp(email, password)
+                        onGoogleSignInClicked(
+                            context = context,
+                            credentialManager = credentialManager,
+                            onAuthSuccess = {
                                 isLoading = false
-                                res.onSuccess {
-                                    onAuthSuccess()
-                                }.onFailure { err ->
-                                    val msg = err.message ?: "Unable to create account."
-                                    if (msg.startsWith("Account created!")) {
-                                        infoMessage = msg
-                                        isSignUpMode = false
-                                    } else {
-                                        errorMessage = msg
-                                    }
-                                }
-                            } else {
-                                val res = authManager.signIn(email, password)
+                                onAuthSuccess()
+                            },
+                            onAuthError = { msg ->
                                 isLoading = false
-                                res.onSuccess {
-                                    onAuthSuccess()
-                                }.onFailure { err ->
-                                    errorMessage = err.message ?: "Unable to sign in."
-                                }
-                            }
-                        }
+                                errorMessage = msg
+                            },
+                            onAuthCancelled = {
+                                isLoading = false
+                            },
+                            scope = scope
+                        )
                     },
-                    enabled = !isLoading && email.isNotBlank() && password.length >= 6,
+                    enabled = !isLoading,
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
@@ -406,8 +287,8 @@ fun AuthScreen(
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(54.dp)
-                        .testTag("auth_submit_button")
+                        .height(56.dp)
+                        .testTag("google_sign_in_button")
                 ) {
                     if (isLoading) {
                         CircularProgressIndicator(
@@ -416,48 +297,28 @@ fun AuthScreen(
                             strokeWidth = 2.5.dp
                         )
                     } else {
+                        Icon(
+                            imageVector = Icons.Filled.AccountCircle,
+                            contentDescription = null,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(Modifier.width(10.dp))
                         Text(
-                            text = if (isSignUpMode) "Create Account" else "Sign In",
+                            text = "Continue with Google",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                     }
                 }
 
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(12.dp))
                 Text(
-                    text = "Your email stays private. Friends find you only by your @username.",
+                    text = "Your Google email stays private. Friends find you only by your @username.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun AuthModePill(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Surface(
-        color = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent,
-        shape = RoundedCornerShape(10.dp),
-        modifier = modifier
-            .height(48.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
     }
 }
@@ -483,32 +344,33 @@ private fun FeatureRow(text: String) {
 @Composable
 fun ProfileSetupScreen(
     viewModel: UChatViewModel,
-    userEmail: String
+    suggestedDisplayName: String,
+    userEmail: String,
+    onSignOut: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val emailHandle = remember(userEmail) {
-        userEmail.substringBefore("@").ifBlank { "uchat_user" }
-    }
-
-    var displayName by remember {
-        mutableStateOf(
-            emailHandle.replace(Regex("[._-]+"), " ")
+    val seedName = remember(suggestedDisplayName, userEmail) {
+        suggestedDisplayName.trim().ifBlank {
+            userEmail.substringBefore("@")
+                .replace(Regex("[._-]+"), " ")
                 .split(" ")
                 .filter { it.isNotBlank() }
                 .joinToString(" ") { part -> part.replaceFirstChar { it.uppercaseChar() } }
-                .take(40)
-        )
+                .ifBlank { "UChat User" }
+        }.take(60)
     }
+
+    var displayName by remember { mutableStateOf(seedName) }
     var username by remember {
-        val suggested = emailHandle
+        val base = (suggestedDisplayName.ifBlank { userEmail.substringBefore("@") })
             .lowercase()
             .replace(Regex("[^a-z0-9_]"), "_")
             .replace(Regex("_+"), "_")
             .trim('_')
             .take(18)
             .let { if (it.length < 3) "uchat_user" else it }
-        mutableStateOf(suggested)
+        mutableStateOf(base)
     }
     var about by remember { mutableStateOf("Hey there! I am using UChat.") }
     var avatarBase64 by remember { mutableStateOf<String?>(null) }
@@ -694,7 +556,7 @@ fun ProfileSetupScreen(
                 )
             }
 
-            Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(24.dp))
 
             Button(
                 onClick = {
@@ -726,6 +588,14 @@ fun ProfileSetupScreen(
                         fontWeight = FontWeight.Bold
                     )
                 }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            TextButton(
+                onClick = onSignOut,
+                modifier = Modifier.testTag("setup_sign_out_button")
+            ) {
+                Text("Use a different Google account", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
