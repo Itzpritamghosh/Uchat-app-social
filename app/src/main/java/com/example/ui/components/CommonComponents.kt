@@ -343,13 +343,23 @@ fun WebRtcVideoRenderer(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val renderer = remember(eglBaseContext) {
+    val renderer = remember(eglBaseContext, zOrderMediaOverlay) {
         SurfaceViewRenderer(context).apply {
             init(eglBaseContext, null)
             setEnableHardwareScaler(true)
             setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+            setZOrderOnTop(false)
             setZOrderMediaOverlay(zOrderMediaOverlay)
             setMirror(mirror)
+            if (zOrderMediaOverlay) {
+                outlineProvider = object : android.view.ViewOutlineProvider() {
+                    override fun getOutline(view: android.view.View, outline: android.graphics.Outline) {
+                        val radiusPx = 18f * view.resources.displayMetrics.density
+                        outline.setRoundRect(0, 0, view.width, view.height, radiusPx)
+                    }
+                }
+                clipToOutline = true
+            }
         }
     }
 
@@ -377,7 +387,7 @@ fun WebRtcVideoRenderer(
 
     AndroidView(
         factory = { renderer },
-        modifier = modifier.clip(RoundedCornerShape(if (zOrderMediaOverlay) 16.dp else 0.dp))
+        modifier = modifier
     )
 }
 

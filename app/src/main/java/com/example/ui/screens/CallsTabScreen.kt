@@ -1,12 +1,20 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.PackageManager
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,11 +43,13 @@ import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Hearing
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -56,6 +66,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -69,7 +80,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -146,7 +159,7 @@ fun CallsTabScreen(
                         EmptyStateCard(
                             icon = Icons.Filled.Call,
                             title = "No recent calls",
-                            body = "Place a free peer-to-peer WebRTC audio or video call with any UChat user.",
+                            body = "Place a real-time audio or video call with any UChat user.",
                             action = {
                                 TextButton(onClick = { showNewCallSheet = true }) {
                                     Icon(Icons.Filled.AddIcCall, contentDescription = null)
@@ -227,7 +240,7 @@ fun CallsTabScreen(
         ) {
             Column(modifier = Modifier.fillMaxWidth().padding(bottom = 28.dp)) {
                 Text(
-                    text = "Start WebRTC Audio or Video Call",
+                    text = "Start Audio or Video Call",
                     style = MaterialTheme.typography.titleLarge,
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
                 )
@@ -327,6 +340,15 @@ private fun CallHistoryRow(
     }
 }
 
+private fun Context.findActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
+}
+
 @Composable
 fun ActiveCallOverlay(
     call: CallRecord,
@@ -350,11 +372,13 @@ fun ActiveCallOverlay(
     var speakerOn by remember(call.id) { mutableStateOf(isVideo) }
     var cameraOn by remember(call.id) { mutableStateOf(isVideo) }
     var useFrontCamera by remember(call.id) { mutableStateOf(true) }
+    var controlsVisible by remember(call.id) { mutableStateOf(true) }
     var elapsedSec by remember(call.id) { mutableLongStateOf(0L) }
     var calleeAccepted by remember(call.id) { mutableStateOf(isOutgoing || call.status != "ringing") }
     var offerPublished by remember(call.id) { mutableStateOf(false) }
-    var answerPublished by remember(call.id) { mutableStateOf(false) }
-    var remoteAnswerApplied by remember(call.id) { mutableStateOf(false) }
+    var lastAppliedOffer by remember(call.id) { mutableStateOf<String?>(null) }
+    var lastAppliedAnswer by remember(call.id) { mutableStateOf<String?>(null) }
+    var iceRestartAttempted by remember(call.id) { mutableStateOf(false) }
     var iceNotice by remember(call.id) { mutableStateOf<String?>(null) }
 
     var hasAudioPermission by remember {
@@ -379,7 +403,7 @@ fun ActiveCallOverlay(
         permissionsChecked = true
     }
 
-    LaunchedEffect(call.id) {
+    fun requestMissingCallPermissions() {
         val toRequest = buildList {
             if (!hasAudioPermission) add(Manifest.permission.RECORD_AUDIO)
             if (isVideo && !hasCameraPermission) add(Manifest.permission.CAMERA)
@@ -391,15 +415,50 @@ fun ActiveCallOverlay(
         }
     }
 
-    // Start real peer-to-peer WebRTC engine once permissions are resolved and (caller OR callee accepted)
+    LaunchedEffect(call.id) {
+        requestMissingCallPermissions()
+    }
+
+    val isIncomingRinging = call.status == "ringing" && !isOutgoing && !calleeAccepted
+
+    // Prepare voice communication audio mode + earpiece/speaker route as soon as call is active
+    LaunchedEffect(call.id, isIncomingRinging, speakerOn) {
+        if (!isIncomingRinging) {
+            CallAudioController.prepareVoiceCallAudio(context, speakerOn)
+        }
+    }
+
+    // Hardware proximity sensor: turn screen off when held near ear in earpiece mode, wake when removed
+    val useProximitySensor = !isIncomingRinging && !speakerOn
+    LaunchedEffect(call.id, useProximitySensor) {
+        CallAudioController.setProximityScreenOffEnabled(context, useProximitySensor)
+    }
+
+    // Keep screen awake during video calls or speakerphone calls
+    val keepScreenOn = isVideo || speakerOn
+    DisposableEffect(call.id, keepScreenOn) {
+        val window = context.findActivity()?.window
+        if (keepScreenOn) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    // Start WebRTC engine once microphone permission is granted and (caller OR callee accepted)
     val shouldStartWebRtc = permissionsChecked && hasAudioPermission && (isOutgoing || calleeAccepted)
     val rtcEngine = remember(call.id, shouldStartWebRtc) {
         if (!shouldStartWebRtc) {
             null
         } else {
+            CallAudioController.prepareVoiceCallAudio(context, speakerOn)
             WebRtcCallEngine(
                 context = context,
-                isVideo = isVideo && hasCameraPermission,
+                isVideoCall = isVideo,
+                canCaptureCamera = isVideo && hasCameraPermission,
                 onLocalIceCandidate = { cand ->
                     onSendIceCandidate(cand.sdp, cand.sdpMid ?: "0", cand.sdpMLineIndex)
                 },
@@ -417,38 +476,54 @@ fun ActiveCallOverlay(
     val rtcState by (rtcEngine?.state?.collectAsStateWithLifecycle()
         ?: remember { mutableStateOf(WebRtcCallState()) })
     val allCandidates by candidatesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val isLiveConnected = call.status == "connected" || rtcState.isConnected
 
-    // Caller creates & publishes real WebRTC SDP Offer via Supabase Realtime
+    // Caller creates & publishes initial WebRTC SDP Offer
     LaunchedEffect(rtcEngine) {
         if (rtcEngine != null && isOutgoing && !offerPublished) {
             offerPublished = true
-            rtcEngine.createOffer { offerSdp ->
+            rtcEngine.createOffer(iceRestart = false) { offerSdp ->
                 onPublishOffer(offerSdp)
             }
         }
     }
 
-    // Caller applies remote SDP Answer when callee accepts
+    // Caller applies remote SDP Answer whenever callee publishes or updates it (including after ICE restart)
     LaunchedEffect(rtcEngine, call.sdpAnswer) {
         val remoteAnswer = call.sdpAnswer
-        if (rtcEngine != null && isOutgoing && !remoteAnswerApplied && !remoteAnswer.isNullOrBlank()) {
-            remoteAnswerApplied = true
+        if (rtcEngine != null && isOutgoing && !remoteAnswer.isNullOrBlank() && remoteAnswer != lastAppliedAnswer) {
+            lastAppliedAnswer = remoteAnswer
             rtcEngine.setRemoteAnswer(remoteAnswer)
         }
     }
 
-    // Callee applies remote SDP Offer and publishes SDP Answer after tapping Accept
+    // Callee applies remote SDP Offer and publishes SDP Answer (also handles caller ICE restart offers)
     LaunchedEffect(rtcEngine, calleeAccepted, call.sdpOffer) {
         val remoteOffer = call.sdpOffer
-        if (rtcEngine != null && !isOutgoing && calleeAccepted && !answerPublished && !remoteOffer.isNullOrBlank()) {
-            answerPublished = true
+        if (rtcEngine != null && !isOutgoing && calleeAccepted && !remoteOffer.isNullOrBlank() && remoteOffer != lastAppliedOffer) {
+            lastAppliedOffer = remoteOffer
             rtcEngine.handleRemoteOfferAndCreateAnswer(remoteOffer) { answerSdp ->
                 onAcceptWithAnswer(answerSdp)
             }
         }
     }
 
-    // Feed incoming remote ICE candidates from Supabase Realtime into PeerConnection
+    // Automatic ICE restart if caller stays stuck connecting/failed for 12s after answer arrives
+    LaunchedEffect(rtcEngine, isOutgoing, lastAppliedAnswer, rtcState.isConnected, rtcState.iceState) {
+        if (rtcEngine != null && isOutgoing && !lastAppliedAnswer.isNullOrBlank() && !rtcState.isConnected && !iceRestartAttempted) {
+            val waitMs = if (rtcState.iceState == "FAILED") 2_000L else 12_000L
+            delay(waitMs)
+            if (!rtcState.isConnected && !iceRestartAttempted) {
+                iceRestartAttempted = true
+                iceNotice = "Switching to relay connection..."
+                rtcEngine.createOffer(iceRestart = true) { newOfferSdp ->
+                    onPublishOffer(newOfferSdp)
+                }
+            }
+        }
+    }
+
+    // Feed incoming remote ICE candidates from Supabase into PeerConnection
     LaunchedEffect(rtcEngine, allCandidates) {
         if (rtcEngine != null) {
             allCandidates
@@ -463,7 +538,7 @@ fun ActiveCallOverlay(
         }
     }
 
-    // Ringtone / Ringback lifecycle — guaranteed single instance, stops immediately when accepted/connected/disposed
+    // Ringtone / Ringback lifecycle
     LaunchedEffect(call.id, call.status, calleeAccepted, soundEnabled) {
         if (call.status == "ringing" && !(!isOutgoing && calleeAccepted) && soundEnabled) {
             if (isOutgoing) {
@@ -476,12 +551,10 @@ fun ActiveCallOverlay(
         }
     }
 
-    // Configure speaker routing and count duration once connected
-    LaunchedEffect(call.id, call.status) {
-        if (call.status == "connected" || call.status == "connecting") {
+    // Re-apply speaker/earpiece route right after WebRTC audio track starts & count live call duration
+    LaunchedEffect(call.id, isLiveConnected) {
+        if (isLiveConnected) {
             CallAudioController.setSpeakerphoneOn(context, speakerOn)
-        }
-        if (call.status == "connected") {
             while (true) {
                 delay(1000L)
                 elapsedSec += 1L
@@ -501,41 +574,104 @@ fun ActiveCallOverlay(
         }
     }
 
+    val hasRemoteVideo = isVideo && rtcEngine != null && rtcState.remoteVideoTrack != null
+    val hasLocalVideo = isVideo && rtcEngine != null && rtcState.localVideoTrack != null && cameraOn
+
+    // Edge-to-edge full-screen root Box (NO statusBarsPadding here so video renders right behind the transparent status bar!)
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    listOf(Color(0xFF06160E), Color(0xFF000000), Color(0xFF0A1410))
+                    listOf(Color(0xFF071D13), Color(0xFF030705), Color(0xFF06130C))
                 )
             )
-            .statusBarsPadding()
-            .navigationBarsPadding()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                enabled = hasRemoteVideo
+            ) {
+                controlsVisible = !controlsVisible
+            }
             .testTag("active_call_overlay")
     ) {
-        // Real WebRTC Video Rendering (Full-screen Remote Video + PiP Local Camera)
+        // Full-bleed edge-to-edge WebRTC video layer
         if (isVideo && rtcEngine != null) {
             val remoteTrack = rtcState.remoteVideoTrack
             val localTrack = rtcState.localVideoTrack
 
             if (remoteTrack != null) {
-                WebRtcVideoRenderer(
-                    videoTrack = remoteTrack,
-                    eglBaseContext = rtcEngine.eglBase.eglBaseContext,
-                    mirror = false,
-                    zOrderMediaOverlay = false,
+                key("remote_video_${call.id}") {
+                    WebRtcVideoRenderer(
+                        videoTrack = remoteTrack,
+                        eglBaseContext = rtcEngine.eglBase.eglBaseContext,
+                        mirror = false,
+                        zOrderMediaOverlay = false,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("webrtc_remote_video_view")
+                    )
+                }
+            } else if (localTrack != null && cameraOn) {
+                key("local_full_preview_${call.id}") {
+                    WebRtcVideoRenderer(
+                        videoTrack = localTrack,
+                        eglBaseContext = rtcEngine.eglBase.eglBaseContext,
+                        mirror = useFrontCamera,
+                        zOrderMediaOverlay = false,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag("webrtc_local_preview_view")
+                    )
+                }
+                // Soft vignette over self-preview while waiting for peer video
+                Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .testTag("webrtc_remote_video_view")
+                        .background(Color.Black.copy(alpha = 0.28f))
                 )
-                if (localTrack != null && cameraOn) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(top = 72.dp, end = 16.dp)
-                            .size(width = 114.dp, height = 164.dp)
-                            .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(16.dp))
-                    ) {
+            }
+
+            // Subtle top & bottom gradients so transparent status bar icons and controls stay crystal-clear over bright video
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(180.dp)
+                    .align(Alignment.TopCenter)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Black.copy(alpha = 0.62f), Color.Transparent)
+                        )
+                    )
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .align(Alignment.BottomCenter)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.72f))
+                        )
+                    )
+            )
+
+            // Floating Local Camera PiP (top-right, below transparent status bar; tap to flip camera)
+            if (remoteTrack != null && localTrack != null && cameraOn) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .statusBarsPadding()
+                        .padding(top = 14.dp, end = 14.dp)
+                        .size(width = 112.dp, height = 158.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .border(1.5.dp, Color.White.copy(alpha = 0.65f), RoundedCornerShape(18.dp))
+                        .clickable {
+                            useFrontCamera = !useFrontCamera
+                            rtcEngine.switchCamera()
+                        }
+                ) {
+                    key("local_pip_${call.id}") {
                         WebRtcVideoRenderer(
                             videoTrack = localTrack,
                             eglBaseContext = rtcEngine.eglBase.eglBaseContext,
@@ -546,135 +682,225 @@ fun ActiveCallOverlay(
                                 .testTag("webrtc_local_pip_video_view")
                         )
                     }
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.55f),
+                        shape = CircleShape,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(6.dp)
+                            .size(26.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Filled.Cameraswitch,
+                                contentDescription = "Switch camera",
+                                tint = Color.White,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
                 }
-            } else if (localTrack != null && cameraOn) {
-                // Local live WebRTC camera preview while ringing or negotiating peer video
-                WebRtcVideoRenderer(
-                    videoTrack = localTrack,
-                    eglBaseContext = rtcEngine.eglBase.eglBaseContext,
-                    mirror = useFrontCamera,
-                    zOrderMediaOverlay = false,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .testTag("webrtc_local_preview_view")
-                )
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.42f))
-                )
             }
         }
 
-        // Top caller identity & live WebRTC signaling status
-        Column(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 44.dp, start = 24.dp, end = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            val hideCenterIdentity = isVideo && rtcState.remoteVideoTrack != null
-            if (!hideCenterIdentity) {
-                UserAvatar(name = call.peerName(myUid), size = 96.dp)
+        val statusLabel = when {
+            !hasAudioPermission && permissionsChecked -> "Microphone permission required"
+            isLiveConnected -> formatDurationSec(elapsedSec)
+            iceNotice != null -> iceNotice!!
+            call.status == "ringing" && isOutgoing -> "Ringing..."
+            isIncomingRinging -> "Incoming ${if (isVideo) "video" else "voice"} call"
+            else -> "Connecting..."
+        }
+
+        // Top Header (compact top-left HUD when remote video is streaming; centered hero card for voice/ringing)
+        if (hasRemoteVideo) {
+            AnimatedVisibility(
+                visible = controlsVisible,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(start = 16.dp, top = 14.dp, end = 138.dp)
+            ) {
+                Surface(
+                    color = Color.Black.copy(alpha = 0.45f),
+                    shape = RoundedCornerShape(20.dp),
+                    modifier = Modifier.border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(20.dp))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(if (isLiveConnected) Color(0xFF25D366) else Color(0xFFFFD60A))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = call.peerName(myUid),
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = statusLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White.copy(alpha = 0.85f)
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = if (hasLocalVideo) 36.dp else 72.dp, start = 24.dp, end = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(116.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
+                        .border(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f), CircleShape)
+                ) {
+                    UserAvatar(name = call.peerName(myUid), size = 96.dp)
+                }
                 Spacer(Modifier.height(18.dp))
                 Text(
                     text = call.peerName(myUid),
                     style = MaterialTheme.typography.headlineMedium,
-                    color = Color.White
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    textAlign = TextAlign.Center
                 )
+                Spacer(Modifier.height(4.dp))
                 Text(
                     text = "@${call.peerUsername(myUid)}",
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.primary
                 )
-                Spacer(Modifier.height(10.dp))
-            }
-
-            val statusLabel = when {
-                !hasAudioPermission && permissionsChecked -> "Microphone permission required"
-                iceNotice != null -> iceNotice!!
-                call.status == "ringing" && isOutgoing -> "Calling (${call.callType})..."
-                call.status == "ringing" && !isOutgoing && !calleeAccepted -> "Incoming ${call.callType} call..."
-                call.status == "connecting" || (!isOutgoing && calleeAccepted && call.status == "ringing") ->
-                    "Connecting WebRTC P2P (${rtcState.iceState.lowercase()})..."
-                call.status == "connected" -> "WebRTC Live • ${formatDurationSec(elapsedSec)}"
-                else -> call.status.replaceFirstChar { it.uppercase() }
-            }
-            Surface(
-                color = Color.Black.copy(alpha = 0.62f),
-                shape = RoundedCornerShape(50)
-            ) {
-                Text(
-                    text = statusLabel,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
-                )
-            }
-            if (rtcState.errorMessage != null) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = rtcState.errorMessage ?: "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    textAlign = TextAlign.Center
-                )
+                Spacer(Modifier.height(14.dp))
+                Surface(
+                    color = Color.Black.copy(alpha = 0.55f),
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(50))
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (isLiveConnected) Color(0xFF25D366) else MaterialTheme.colorScheme.primary
+                                )
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = if (isLiveConnected) {
+                                "${if (speakerOn) "Speaker" else "Earpiece"} • $statusLabel"
+                            } else {
+                                statusLabel
+                            },
+                            style = MaterialTheme.typography.labelLarge,
+                            color = Color.White
+                        )
+                    }
+                }
+                if (!hasAudioPermission && permissionsChecked) {
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = { requestMissingCallPermissions() }) {
+                        Text("Allow Microphone")
+                    }
+                }
+                if (rtcState.errorMessage != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = rtcState.errorMessage ?: "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        textAlign = TextAlign.Center
+                    )
+                }
             }
         }
 
-        // Bottom Controls
-        Surface(
-            color = Color(0xFF141416).copy(alpha = 0.92f),
-            shape = RoundedCornerShape(30.dp),
+        // Bottom Floating Controls Dock
+        AnimatedVisibility(
+            visible = !hasRemoteVideo || controlsVisible,
+            enter = fadeIn(),
+            exit = fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(horizontal = 20.dp, vertical = 24.dp)
+                .navigationBarsPadding()
+                .padding(horizontal = 18.dp, vertical = 20.dp)
                 .fillMaxWidth()
         ) {
-            if (call.status == "ringing" && !isOutgoing && !calleeAccepted) {
-                // Incoming call: Accept or Decline
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 22.dp, horizontal = 36.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CallCircleButton(
-                        icon = Icons.Filled.CallEnd,
-                        label = "Decline",
-                        bg = Color(0xFFFF453A),
-                        onClick = {
-                            CallAudioController.stopAllTones()
-                            onReject()
-                        },
-                        testTag = "call_reject_button"
-                    )
-                    CallCircleButton(
-                        icon = if (isVideo) Icons.Filled.Videocam else Icons.Filled.Call,
-                        label = "Accept",
-                        bg = Color(0xFF25D366),
-                        iconTint = Color.Black,
-                        onClick = {
-                            CallAudioController.stopAllTones()
-                            calleeAccepted = true
-                        },
-                        testTag = "call_accept_button"
-                    )
-                }
-            } else {
-                // Outgoing, Connecting, or Live P2P Call Controls
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 18.dp, horizontal = 14.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
+            Surface(
+                color = Color(0xFF121417).copy(alpha = if (hasRemoteVideo) 0.78f else 0.92f),
+                shape = RoundedCornerShape(32.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(32.dp))
+            ) {
+                if (isIncomingRinging) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 22.dp, horizontal = 40.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CallCircleButton(
+                            icon = Icons.Filled.CallEnd,
+                            label = "Decline",
+                            bg = Color(0xFFFF453A),
+                            onClick = {
+                                CallAudioController.stopAllTones()
+                                onReject()
+                            },
+                            testTag = "call_reject_button"
+                        )
+                        CallCircleButton(
+                            icon = if (isVideo) Icons.Filled.Videocam else Icons.Filled.Call,
+                            label = "Accept",
+                            bg = Color(0xFF25D366),
+                            iconTint = Color.Black,
+                            onClick = {
+                                CallAudioController.stopAllTones()
+                                requestMissingCallPermissions()
+                                calleeAccepted = true
+                            },
+                            testTag = "call_accept_button"
+                        )
+                    }
+                } else if (isVideo) {
+                    // Compact sleek single-row dock for video calls so maximum screen shows video
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 14.dp, horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         CallCircleButton(
                             icon = if (micMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
                             label = if (micMuted) "Unmute" else "Mute",
-                            bg = if (micMuted) Color.White else Color(0xFF28282C),
+                            bg = if (micMuted) Color.White else Color.White.copy(alpha = 0.16f),
                             iconTint = if (micMuted) Color.Black else Color.White,
+                            buttonSizeDp = 52,
                             onClick = {
                                 micMuted = !micMuted
                                 rtcEngine?.setMicMuted(micMuted)
@@ -683,52 +909,103 @@ fun ActiveCallOverlay(
                             testTag = "call_mute_button"
                         )
                         CallCircleButton(
-                            icon = Icons.AutoMirrored.Filled.VolumeUp,
-                            label = if (speakerOn) "Speaker On" else "Speaker",
-                            bg = if (speakerOn) MaterialTheme.colorScheme.primary else Color(0xFF28282C),
+                            icon = if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
+                            label = if (cameraOn) "Video" else "Cam Off",
+                            bg = if (cameraOn) Color.White.copy(alpha = 0.16f) else Color.White,
+                            iconTint = if (cameraOn) Color.White else Color.Black,
+                            buttonSizeDp = 52,
+                            onClick = {
+                                cameraOn = !cameraOn
+                                rtcEngine?.setCameraEnabled(cameraOn)
+                            },
+                            testTag = "call_camera_toggle_button"
+                        )
+                        CallCircleButton(
+                            icon = Icons.Filled.Cameraswitch,
+                            label = "Flip",
+                            bg = Color.White.copy(alpha = 0.16f),
+                            buttonSizeDp = 52,
+                            onClick = {
+                                useFrontCamera = !useFrontCamera
+                                rtcEngine?.switchCamera()
+                            },
+                            testTag = "call_camera_flip_button"
+                        )
+                        CallCircleButton(
+                            icon = if (speakerOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.Filled.Hearing,
+                            label = if (speakerOn) "Speaker" else "Earpiece",
+                            bg = if (speakerOn) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.16f),
                             iconTint = if (speakerOn) Color.Black else Color.White,
+                            buttonSizeDp = 52,
                             onClick = {
                                 speakerOn = !speakerOn
                                 CallAudioController.setSpeakerphoneOn(context, speakerOn)
                             },
                             testTag = "call_speaker_button"
                         )
-                        if (isVideo) {
+                        CallCircleButton(
+                            icon = Icons.Filled.CallEnd,
+                            label = "End",
+                            bg = Color(0xFFFF453A),
+                            buttonSizeDp = 52,
+                            onClick = {
+                                rtcEngine?.release()
+                                CallAudioController.resetAudioRouting(context)
+                                onEnd(elapsedSec)
+                            },
+                            testTag = "call_end_button"
+                        )
+                    }
+                } else {
+                    // Clean Voice Call dock with Mute, Speaker/Earpiece toggle, and Red End Call
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 20.dp, horizontal = 20.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
                             CallCircleButton(
-                                icon = if (cameraOn) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
-                                label = if (cameraOn) "Cam On" else "Cam Off",
-                                bg = if (cameraOn) Color(0xFF28282C) else Color.White,
-                                iconTint = if (cameraOn) Color.White else Color.Black,
+                                icon = if (micMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
+                                label = if (micMuted) "Unmute" else "Mute",
+                                bg = if (micMuted) Color.White else Color.White.copy(alpha = 0.16f),
+                                iconTint = if (micMuted) Color.Black else Color.White,
                                 onClick = {
-                                    cameraOn = !cameraOn
-                                    rtcEngine?.setCameraEnabled(cameraOn)
+                                    micMuted = !micMuted
+                                    rtcEngine?.setMicMuted(micMuted)
+                                    CallAudioController.setMicrophoneMute(context, micMuted)
                                 },
-                                testTag = "call_camera_toggle_button"
+                                testTag = "call_mute_button"
                             )
                             CallCircleButton(
-                                icon = Icons.Filled.Cameraswitch,
-                                label = "Flip",
-                                bg = Color(0xFF28282C),
+                                icon = if (speakerOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.Filled.Hearing,
+                                label = if (speakerOn) "Speaker" else "Earpiece",
+                                bg = if (speakerOn) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.16f),
+                                iconTint = if (speakerOn) Color.Black else Color.White,
                                 onClick = {
-                                    useFrontCamera = !useFrontCamera
-                                    rtcEngine?.switchCamera()
+                                    speakerOn = !speakerOn
+                                    CallAudioController.setSpeakerphoneOn(context, speakerOn)
                                 },
-                                testTag = "call_camera_flip_button"
+                                testTag = "call_speaker_button"
                             )
                         }
+                        Spacer(Modifier.height(20.dp))
+                        CallCircleButton(
+                            icon = Icons.Filled.CallEnd,
+                            label = if (call.status == "ringing" && isOutgoing) "Cancel" else "End Call",
+                            bg = Color(0xFFFF453A),
+                            buttonSizeDp = 64,
+                            onClick = {
+                                rtcEngine?.release()
+                                CallAudioController.resetAudioRouting(context)
+                                onEnd(elapsedSec)
+                            },
+                            testTag = "call_end_button"
+                        )
                     }
-                    Spacer(Modifier.height(18.dp))
-                    CallCircleButton(
-                        icon = Icons.Filled.CallEnd,
-                        label = if (call.status == "ringing" && isOutgoing) "Cancel" else "End Call",
-                        bg = Color(0xFFFF453A),
-                        onClick = {
-                            rtcEngine?.release()
-                            CallAudioController.resetAudioRouting(context)
-                            onEnd(elapsedSec)
-                        },
-                        testTag = "call_end_button"
-                    )
                 }
             }
         }
@@ -741,6 +1018,7 @@ private fun CallCircleButton(
     label: String,
     bg: Color,
     iconTint: Color = Color.White,
+    buttonSizeDp: Int = 58,
     onClick: () -> Unit,
     testTag: String
 ) {
@@ -749,16 +1027,26 @@ private fun CallCircleButton(
             color = bg,
             shape = CircleShape,
             modifier = Modifier
-                .size(58.dp)
+                .size(buttonSizeDp.dp)
                 .clip(CircleShape)
                 .clickable(onClick = onClick)
                 .testTag(testTag)
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(icon, contentDescription = label, tint = iconTint, modifier = Modifier.size(26.dp))
+                Icon(
+                    icon,
+                    contentDescription = label,
+                    tint = iconTint,
+                    modifier = Modifier.size((buttonSizeDp * 0.45f).dp)
+                )
             }
         }
         Spacer(Modifier.height(6.dp))
-        Text(label, style = MaterialTheme.typography.labelSmall, color = Color.White.copy(alpha = 0.85f))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White.copy(alpha = 0.9f),
+            maxLines = 1
+        )
     }
 }

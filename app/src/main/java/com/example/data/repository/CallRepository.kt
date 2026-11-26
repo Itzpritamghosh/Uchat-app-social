@@ -26,7 +26,7 @@ class CallRepository(
     }.format(Date())
 
     fun observeCalls(userId: String): Flow<List<CallRecord>> =
-        supabase.observeTable(setOf("calls"), fallbackPollMs = 2_500L) {
+        supabase.observeTable(setOf("calls"), fallbackPollMs = 1_500L) {
             val rows = supabase.restGet(
                 table = "calls",
                 queryParams = listOf(
@@ -39,7 +39,7 @@ class CallRepository(
         }
 
     fun observeIceCandidates(callId: String, userId: String): Flow<List<IceCandidateRecord>> =
-        supabase.observeTable(setOf("call_ice_candidates"), fallbackPollMs = 2_000L) {
+        supabase.observeTable(setOf("call_ice_candidates"), fallbackPollMs = 1_500L) {
             val rows = supabase.restGet(
                 table = "call_ice_candidates",
                 queryParams = listOf(
@@ -89,36 +89,46 @@ class CallRepository(
     }
 
     suspend fun publishSdpOffer(callId: String, sdpOffer: String): Result<Unit> {
-        return try {
-            requireUserId()
-            val body = JSONObject().apply {
-                put("sdp_offer", sdpOffer.take(20000))
-                put("updated_at", nowIso())
+        var lastError: Exception? = null
+        repeat(3) { attempt ->
+            try {
+                requireUserId()
+                val body = JSONObject().apply {
+                    put("sdp_offer", sdpOffer.take(20000))
+                    put("updated_at", nowIso())
+                }
+                supabase.restPatch("calls", listOf("id" to "eq.$callId"), body)
+                return Result.success(Unit)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                if (attempt < 2) kotlinx.coroutines.delay(500L * (attempt + 1))
             }
-            supabase.restPatch("calls", listOf("id" to "eq.$callId"), body)
-            Result.success(Unit)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Result.failure(e)
         }
+        return Result.failure(lastError ?: IllegalStateException("Failed to publish offer"))
     }
 
     suspend fun acceptCall(call: CallRecord, sdpAnswer: String): Result<Unit> {
-        return try {
-            requireUserId()
-            val body = JSONObject().apply {
-                put("status", "connecting")
-                put("sdp_answer", sdpAnswer.take(20000))
-                put("updated_at", nowIso())
+        var lastError: Exception? = null
+        repeat(3) { attempt ->
+            try {
+                requireUserId()
+                val body = JSONObject().apply {
+                    put("status", "connecting")
+                    put("sdp_answer", sdpAnswer.take(20000))
+                    put("updated_at", nowIso())
+                }
+                supabase.restPatch("calls", listOf("id" to "eq.${call.id}"), body)
+                return Result.success(Unit)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                if (attempt < 2) kotlinx.coroutines.delay(500L * (attempt + 1))
             }
-            supabase.restPatch("calls", listOf("id" to "eq.${call.id}"), body)
-            Result.success(Unit)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Result.failure(e)
         }
+        return Result.failure(lastError ?: IllegalStateException("Failed to publish answer"))
     }
 
     suspend fun markCallConnected(callId: String): Result<Unit> {

@@ -359,7 +359,11 @@ fun ChatDetailScreen(
                                 onClick = onBack,
                                 modifier = Modifier.testTag("chat_back_button")
                             ) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to chats")
+                                Icon(
+                                    Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = "Back to chats",
+                                    tint = Color.White
+                                )
                             }
                         }
                         Row(
@@ -415,25 +419,42 @@ fun ChatDetailScreen(
                             }
                         }
 
-                        if (conversation.kind == "direct" && !isSelfChat && peerProfile != null) {
+                        if (conversation.kind == "direct" && !isSelfChat && peerUid != null) {
+                            val callTarget = peerProfile ?: UserProfile(
+                                userId = peerUid,
+                                username = conversation.peerUsername(myUid),
+                                displayName = conversation.displayTitle(myUid)
+                            )
                             IconButton(
-                                onClick = { viewModel.initiateCall(peerProfile, "video") },
+                                onClick = { viewModel.initiateCall(callTarget, "video") },
                                 modifier = Modifier.testTag("chat_video_call_button")
                             ) {
-                                Icon(Icons.Filled.Videocam, contentDescription = "Video call")
+                                Icon(
+                                    Icons.Filled.Videocam,
+                                    contentDescription = "Video call",
+                                    tint = Color.White
+                                )
                             }
                             IconButton(
-                                onClick = { viewModel.initiateCall(peerProfile, "audio") },
+                                onClick = { viewModel.initiateCall(callTarget, "audio") },
                                 modifier = Modifier.testTag("chat_audio_call_button")
                             ) {
-                                Icon(Icons.Filled.Call, contentDescription = "Audio call")
+                                Icon(
+                                    Icons.Filled.Call,
+                                    contentDescription = "Audio call",
+                                    tint = Color.White
+                                )
                             }
                         } else if (conversation.kind == "group") {
                             IconButton(
                                 onClick = { showGroupInfoSheet = true },
                                 modifier = Modifier.testTag("chat_group_info_button")
                             ) {
-                                Icon(Icons.Filled.Group, contentDescription = "Group settings")
+                                Icon(
+                                    Icons.Filled.Group,
+                                    contentDescription = "Group settings",
+                                    tint = Color.White
+                                )
                             }
                         }
 
@@ -444,7 +465,11 @@ fun ChatDetailScreen(
                             },
                             modifier = Modifier.testTag("chat_search_toggle_button")
                         ) {
-                            Icon(Icons.Filled.Search, contentDescription = "Search in conversation")
+                            Icon(
+                                Icons.Filled.Search,
+                                contentDescription = "Search in conversation",
+                                tint = Color.White
+                            )
                         }
                     }
 
